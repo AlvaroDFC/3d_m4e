@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "M4E"
+version = "0.1.0"
+description = "Symbolic multibody dynamics framework"
+authors = [{name = "Alvaro Diaz Flores Caminero", email = "alvaro.diazflorescaminero@nlr.gov"}]
+dependencies = [
+    "numpy",
+    "scipy",
+    "sympy",
+    "pandas",
+    "matplotlib",
+    "networkx"
+]
+
+[tool.setuptools]
+package-dir = {"" = "source"}
+
+[tool.setuptools.packages.find]
+where = ["source"]
