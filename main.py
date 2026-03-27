@@ -1,61 +1,91 @@
 # main file to run multibody 3D examples
-from multibody_3d import JointSystem3D, build_joint_coordinates, VelocityTransformation3D
-# from multibody_3d.multibody_core.kinematics_cache_3d import demo_write_pairs_chain
-from example1 import data
+from multibody_3d import MbdSystem3D
+import example4
 import numpy as np
+from time import time
 
-from sympy import pprint
+import jax
+print(jax.devices())
 
-sys = JointSystem3D.from_data(data)
-print(sys.Btrack)
+t0 = time()
+mbd = MbdSystem3D.from_example(example4)
+print(mbd)
 
 # Display in a table
-table = sys.summary_table(precision=3)
+mbd.summary_table(precision=3)
 
-jCoords = build_joint_coordinates(sys)
-print("Joint coordinates:")
-# display all the joint coordinates on screen
-for coord in jCoords.q:
-    print(f"  {coord.name}")
+params = mbd.build_numeric_params()   # constant geometry — build once, reuse
+t1 = time() - t0
+print(f"Setup: {t1:.2f} s")
 
-kin = VelocityTransformation3D(sys)
-kinCache = kin.build_cache_symbolic(jCoords.q)
+# ── Initial conditions for numerical evaluation  ──────────────────────────────
+# Example 1 ic: 3 revolute joints
+# q_int_np = np.array([0.1 ,0.2 ,0.3])
+# qd_np = np.array([1., 3., 3.])
+# Example 2 ic: spherical revolute pendulum
+# q_int_np = np.array([0.9659, 0., 0., 0.2588, -np.pi/6])
+# qd_np = np.array([0.3, -0.2, 0.5, 1.1])
+# Example 3 ic: Cylindrical + revolut + spherical
+# q_int_np = np.array([0.3, -0.2, 0.5, 0.4, 0.2, 0, 0])
+# qd_np = np.array([0.7, -0.3, 0.4, 1.2])
+# Example 4 ic
+q_int_np = np.array([0. ,0. ,0. ,np.cos(np.pi/6) ,0.9659*np.sin(np.pi/6) ,0. ,0.2588*np.sin(np.pi/6), 0.1, 0.2, 0.3])
+qd_np = np.array([1. ,1. ,2. , 1., 2., 3., 0.1, 0.2, 0.3])
+# Example 5 ic: R - R- P - R
+# q_int_np = np.array([np.pi/6, 0.3, 2, 1.1])
+# qd_np = np.array([0.7, -0.3, 0.4, 1.2])
+# Example 6 ic: R + U
+# q_int_np = np.array([np.pi/6, 0.3, 2])
+# qd_np = np.array([0.7, -0.4, 1.1])
 
-# assemble the B-matrix symbolically
-B = kin.assemble_B_symbolic(jCoords.q, kinCache) #NOTE: do i pass q or q_int here?
-BD = kin.assemble_Bdot_symbolic(jCoords.q, jCoords.qd, kinCache)
-print("\nB-matrix:")
-# pprint(B)
-print("\nBtrack:")
-print(kin.Btrack)
+####################### Time evaluation ############################################
+# Testing setup
+n = 100
 
+# JAX eager
+t0 = time()
+for _ in range(n):
+    B_jax    = mbd.evaluate_B_jax(q_int_np, params=params)
+    Bdot_jax = mbd.evaluate_Bdot_jax(q_int_np, qd_np, params=params)
+print(f"JAX eager:    {(time()-t0)/n*1e6:.2f} µs/call")
 
-# Compile B-matrix into a function of q
-B_func = kin.compile_B_lambdified(jCoords.q)
-Bdot_func = kin.compile_Bdot_lambdified(jCoords.q, jCoords.qd)
-print("\nB-matrix function:")
-# print(kin.B_explicit)
+# JAX JIT — build, warmup, then time
+B_eval    = mbd.build_B_evaluator_jax(params=params)
+Bdot_eval = mbd.build_Bdot_evaluator_jax(params=params)
+_ = B_eval(q_int_np); _ = Bdot_eval(q_int_np, qd_np)  # compile
 
-# q0 = np.array([0. ,0. ,0. ,1 , 0., 0., 0., 0.1, 0.2, 0.3])  # OMT ic
-q0 = np.array([0.1 ,0.2 ,0.3])  # hover ic
-# q0 = np.array([0.9659, 0., 0., 0.2588, -np.pi/6]) # spherical revolute pendulum ic
-# q0 = np.array([np.pi/6, 0.3, 2, 1.1])  # example5 ic
-# q0 = np.array([np.pi/6, 0.3, 2])  # ex6 ic universal revolute
-B_q0 = B_func(np.hstack((q0)))  # evaluate B at q0, qd0
+t0 = time()
+for _ in range(n):
+    B_jit    = B_eval(q_int_np)
+    Bdot_jit = Bdot_eval(q_int_np, qd_np)
+print(f"JAX JIT:      {(time()-t0)/n*1e6:.2f} µs/call")
 
-print("\nB-matrix evaluated at q0:")
-np.set_printoptions(precision=5, suppress=True, linewidth=200)
-print(B_q0)
+np.set_printoptions(precision=4, suppress=True)
+print("\nB (JAX):")
+print(B_jax)
 
+print("\nB (JIT):")
+print(B_jit)
 
+print("\nBdot (JIT):")
+print(Bdot_jit)
 
-print("\nBdot-matrix:")
-# qd0 = np.array([0. ,0. ,0. , 0., 0., 0., 0.1, 0.2, 0.3])  # OMT ic
-qd0 = np.array([1., 3., 3.])  # hover ic
-# qd0 = np.array([0.3, -0.2, 0.5, 1.1]) # spherical revolute pendulum ic
-# qd0 = np.array([0.7, -0.3, 0.4, 1.2])  # example5 ic
-# qd0 = np.array([0.7, -0.4, 1.1]) # ex6 ic universal revolute
+####### Symbolic B blocks (for inspection, not timed) #####################################
+from multibody_3d import BlockInspector
 
-Bdot_q0 = Bdot_func(q0,qd0)
-print(Bdot_q0)
-print("Reached end")
+# Build all symbolic B blocks indexed by (body_id, joint_index)
+blocks = mbd.vt.build_B_blocks_symbolic(mbd.q_int)
+Bdot_blocks = mbd.vt.build_Bdot_blocks_symbolic(mbd.q_int, mbd.qd_int)
+
+# Access a specific block — e.g. body=1, joint=0
+blk = blocks[(1, 0)]
+print(blk.matrix)       # sympy.Matrix (6×m)
+print(blk.d_kj)         # 3×1 position vector
+print(blk.U_j)          # 3×m axis/basis
+print(blk.joint_type)   # 'R', 'P', 'U', etc.
+
+# Pretty-print all blocks
+BlockInspector.display_B_blocks(blocks)
+
+# Ingredients only (faster, no full matrix expansion)
+BlockInspector.display_B_blocks(blocks, show_matrix=False)

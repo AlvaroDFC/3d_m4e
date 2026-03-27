@@ -1,37 +1,19 @@
-# source/multibody_3d/multibody_core/velocity_transformation_3d.py
+# source/multibody/velocity_transformation_3d.py
 """
 velocity_transformation_3d.py
 
 Topology + indexing utilities for the 3D velocity transformation (B) assembly
-and the symbolic/numeric rate-kinematics layers that support B and Bdot assembly.
+and the symbolic rate-kinematics layer that supports Bdot assembly.
 
-Architecture (four kinematics layers)
--------------------------------------
-**Layer 1 – Raw Kinematics** (position-level cache)
-    ``build_cache_symbolic`` → ``KinematicsCache3D``
-    Computes absolute rotations, CG positions, joint positions, and joint
-    axes/bases for every body and joint in the tree.
-
-**Layer 2 – Block Kinematics**
-    ``_get_block_kinematics`` → ``BlockKinematics3D``
-    Extracts per-block quantities ``d_kj = r_abs[k] - rJ[j]`` and ``U_j``.
-
-**Layer 3 – Rate Kinematics** (first-order velocities)
-    ``build_rate_cache_symbolic`` → ``KinematicsRateCache3D``
-    Computes absolute angular velocities, CG velocities, joint-point
-    velocities, and time-derivatives of joint axes.
-
-**Layer 4 – Block-Rate Kinematics**
-    ``_get_block_rate_kinematics`` → ``BlockRateKinematics3D``
-    Extracts per-block rate quantities ``d_dot_kj`` and ``U_dot_j``.
-
-Downstream consumers:
-    ``_block_B`` / ``_block_Bdot`` — per-block formulas
-    ``build_B_blocks_symbolic`` / ``build_Bdot_blocks_symbolic`` — block dicts
-    ``assemble_B_symbolic`` / ``assemble_Bdot_symbolic`` — full matrix assembly
-    ``compile_B_lambdified`` / ``compile_Bdot_lambdified`` — sympy → numpy (validation / symbolic export)
-    ``evaluate_B_jax`` / ``evaluate_Bdot_jax`` — **preferred runtime path** (JAX backend)
-    ``build_B_evaluator_jax`` / ``build_Bdot_evaluator_jax`` — JIT-compiled runtime evaluators
+This module provides:
+- joint DOF bookkeeping
+- per-joint slices into the system generalized coordinate vector and B columns
+- per-body row slices (6 rows per body)
+- a root-to-leaf write schedule (k, j) to assemble B blocks in a stable order,
+  while preventing duplicate writes across overlapping root-to-leaf paths
+- symbolic position-level kinematics cache (KinematicsCache3D)
+- symbolic first-order rate kinematics cache (KinematicsRateCache3D)
+- block-kinematics helpers (BlockKinematics3D, BlockRateKinematics3D)
 
 Conventions
 -----------
@@ -43,53 +25,50 @@ Conventions
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Iterator, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Iterable, Iterator, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import numpy as np
 import sympy as sym
-from sympy import Identity, MatMul, MatrixSymbol
+from sympy import Identity, MatMul, MatrixSymbol, ZeroMatrix
 
 try:
     # package-style imports
     from .joint_system_3d import JointSystem3D, JointType
     from .topology_3d import build_adjacency, compute_root_to_leaf_joint_paths, validate_tree
-    from ._velocity_transformation_helper import (
-        skew, _axis_angle_rotation, _A_from_quaternion_sym, _type_code,
-        _basis_time_derivative,
-        _block_B_sym, _block_Bdot_sym,
-        _get_block_kinematics, _get_block_rate_kinematics,
-        BodyId, JointIndex, WritePair,
-        BlockKinematics3D, BlockRateKinematics3D,
-        SymbolicBBlock, SymbolicBdotBlock,
-        NumericModelParams,
-    )
-    from ._velocity_transformation_inspector import BlockInspector
+    from ._velocity_transformation_helper import skew, _axis_angle_rotation, _A_from_quaternion_sym, RootToLeafPaths, _type_code
 except Exception:  # pragma: no cover
     # script-style fallback (matches some existing files in the repo)
     from .joint_system_3d import JointSystem3D, JointType
     from .topology_3d import build_adjacency, compute_root_to_leaf_joint_paths, validate_tree
-    from ._velocity_transformation_helper import (
-        skew, _axis_angle_rotation, _A_from_quaternion_sym, _type_code,
-        _basis_time_derivative,
-        _block_B_sym, _block_Bdot_sym,
-        _get_block_kinematics, _get_block_rate_kinematics,
-        BodyId, JointIndex, WritePair,
-        BlockKinematics3D, BlockRateKinematics3D,
-        SymbolicBBlock, SymbolicBdotBlock,
-        NumericModelParams,
-    )
-    from ._velocity_transformation_inspector import BlockInspector
 
 
-# ==================== Symbolic Cache Dataclasses ============================
-# KinematicsCache3D (Layer 1) and KinematicsRateCache3D (Layer 3) live here
-# because they are direct output types of the symbolic cache builders and
-# tightly coupled to VelocityTransformation3D's orchestration logic.
-# BlockKinematics3D / BlockRateKinematics3D (layers 2 & 4) and the block
-# output containers live in _velocity_transformation_helper.py.
+BodyId      = int
+JointIndex  = int
+WritePair   = Tuple[BodyId, JointIndex]
 
-# -- Layer 1 --
+
+@dataclass
+class BlockKinematics3D:
+    """Kinematic quantities for a single (body k, joint j) B block.
+
+    Attributes
+    ----------
+    body_id : int
+        Body index *k* (1..NBodies).
+    joint_index : int
+        Joint index *j* (0..NJoints-1).
+    d_kj : sym.Matrix
+        3×1 vector from joint *j* to body-*k* CG, expressed in the global frame.
+    U_j : sym.Matrix
+        3×m joint axis / basis in the global frame (m depends on joint type).
+    """
+
+    body_id:     int
+    joint_index: int
+    d_kj:        sym.Matrix
+    U_j:         sym.Matrix
+
 
 @dataclass(frozen=True, slots=True)
 class KinematicsCache3D:
@@ -130,8 +109,6 @@ class KinematicsCache3D:
     joint_of_body:  List[int]
 
 
-# -- Layer 3 --
-
 @dataclass(frozen=True, slots=True)
 class KinematicsRateCache3D:
     """Symbolic first-order rate kinematics cache for a 3D multibody system.
@@ -160,16 +137,28 @@ class KinematicsRateCache3D:
     Udot:      List[Any]
 
 
-# (BlockKinematics3D / BlockRateKinematics3D / SymbolicBBlock /
-#  SymbolicBdotBlock / NumericModelParams are imported from
-#  _velocity_transformation_helper; BlockInspector from
-#  _velocity_transformation_inspector.)
+@dataclass
+class BlockRateKinematics3D:
+    """Rate-kinematic quantities for a single (body k, joint j) Bdot block.
 
+    Attributes
+    ----------
+    body_id : int
+        Body index *k* (1..NBodies).
+    joint_index : int
+        Joint index *j* (0..NJoints-1).
+    d_dot_kj : sym.Matrix
+        3×1 time derivative of the position vector from joint *j* to body-*k* CG,
+        in the global frame.  Equal to ``v_abs[k] - vJ[j]``.
+    U_dot_j : sym.Matrix
+        3×m time derivative of the joint axis / basis in the global frame.
+    """
 
-# =============================================================================
+    body_id:    int
+    joint_index: int
+    d_dot_kj:   sym.Matrix
+    U_dot_j:    sym.Matrix
 
-
-# =============================================================================
 
 class VelocityTransformation3D:
     """
@@ -197,32 +186,6 @@ class VelocityTransformation3D:
 
     paths:
         Root-to-leaf joint paths (list of joint-index sequences).
-
-    Method organisation
-    -------------------
-    **Construction / topology**
-        ``__init__``, ``reset_Btrack``, ``iter_write_pairs_root_to_leaf``
-
-    **Symbolic cache builders** (Layers 1–4)
-        ``build_cache_symbolic``, ``_get_block_kinematics``,
-        ``build_rate_cache_symbolic``, ``_get_block_rate_kinematics``
-
-    **Symbolic block assembly**
-        ``_block_B``, ``_block_Bdot``,
-        ``build_B_blocks_symbolic``, ``build_Bdot_blocks_symbolic``,
-        ``assemble_B_from_blocks``, ``assemble_Bdot_from_blocks``,
-        ``print_B_blocks``, ``print_Bdot_blocks``
-
-    **Symbolic full assembly**
-        ``assemble_B_symbolic``, ``assemble_Bdot_symbolic``
-
-    **JAX runtime wrappers** (preferred runtime)
-        ``build_numeric_params``,
-        ``evaluate_B_jax``, ``evaluate_Bdot_jax``,
-        ``build_B_evaluator_jax``, ``build_Bdot_evaluator_jax``
-
-    **Symbolic compilation / debug**
-        ``compile_B_lambdified``, ``compile_Bdot_lambdified``
     """
 
     # Required DOF mapping (by 1-letter code)
@@ -297,145 +260,83 @@ class VelocityTransformation3D:
                         self.Btrack[k, j] = True
                         yield (k, j)
 
-    # ==================== Symbolic Cache Builders ==============================
-    # Layers 1–4: position-level cache, block extraction, rate cache,
-    # and block-rate extraction.  All outputs are SymPy expressions.
+    # -------------------- B block helpers --------------------
 
-    def build_cache_symbolic(self, q: sym.Matrix) -> KinematicsCache3D:
-        """Build a symbolic kinematics cache (no B assembly).
+    def _get_block_kinematics(
+        self,
+        cache: KinematicsCache3D,
+        k: int,
+        j: int,
+    ) -> BlockKinematics3D:
+        """Extract pre-computed kinematic quantities for block (k, j) from the cache.
 
         Parameters
         ----------
-        q : sympy.Matrix
-            Internal configuration vector, shape ``(total_cfg_dof, 1)``.
-            Must be consistent with ``self.q_slices`` (cfg_col_slice).
+        cache : KinematicsCache3D
+            Symbolic kinematics cache built by :meth:`build_cache_symbolic`.
+        k : int
+            Body index (1..NBodies).
+        j : int
+            Joint index (0..NJoints-1).
 
         Returns
         -------
-        KinematicsCache3D
-            Symbolic cache with ``A_abs``, ``r_abs``, ``rJ``, ``U``, ``Arel``.
-
-        Notes
-        -----
-        * Relative rotations are *opaque*: ``Arel[j] = MatrixSymbol(...)``.
-        * All products use ``MatMul(..., evaluate=False)`` to suppress expansion.
-        * Prismatic / cylindrical translation terms use the translational DOF
-          extracted from *q* via ``self.q_slices``.
+        BlockKinematics3D
+            Contains ``d_kj = r_abs[k] - rJ[j]`` and ``U_j`` as explicit
+            ``sym.Matrix`` objects ready for :meth:`_block_B`.
         """
-        q = sym.Matrix(q)
-        if q.shape != (self.total_cfg_dof, 1):
-            raise ValueError(
-                f"q shape mismatch: expected ({self.total_cfg_dof}, 1), got {q.shape}."
-            )
+        d_kj = sym.Matrix(cache.r_abs[k] - cache.rJ[j])
+        U_j  = sym.Matrix(cache.U[j])
+        return BlockKinematics3D(body_id=k, joint_index=j, d_kj=d_kj, U_j=U_j)
 
-        joints  = self.joint_system.joints
-        NB      = self.NBodies
-        NJ      = self.NJoints
-        I3      = Identity(3)
+    # -------------------- S/F Udot helpers --------------------
 
-        # parent / joint-of-body arrays from joint_system
-        parent_of_body: List[int]   = list(self.joint_system.parent_body_of_body)
-        joint_of_body: List[int]    = list(self.joint_system.parent_joint_of_body)
+    @staticmethod
+    def _udot_spherical(omega_p: sym.Matrix, U_j: sym.Matrix) -> sym.Matrix:
+        """Time derivative of the S-joint basis in the global frame.
 
-        # Opaque relative rotations
-        Arel: List[MatrixSymbol] = [
-            MatrixSymbol(f"Arel_{j}", 3, 3) for j in range(NJ)
-        ]
+        The spherical basis is the parent-frame identity rotated into global::
 
-        # Absolute rotations & positions (indexed by body id 0..NBodies)
-        A_abs: List[Any]    = [None] * (NB + 1)
-        A_u1:  List[Any]    = [None] * NJ
-        r_abs: List[Any]    = [None] * (NB + 1)
-        A_abs[0]            = I3
-        r_abs[0]            = sym.zeros(3, 1)
+            U_j = A_p                 (3x3)
+            Udot_j = skew(omega_p) * A_p = skew(omega_p) * U_j
 
-        # Joint quantities (indexed by joint index 0..NJ-1)
-        rJ: List[Any]   = [None] * NJ
-        U: List[Any]    = [None] * NJ
+        Parameters
+        ----------
+        omega_p : sym.Matrix (3,1)
+            Absolute angular velocity of the parent body.
+        U_j : sym.Matrix (3,3)
+            Current joint basis (= A_p evaluated symbolically).
 
-        # Process joints in topological order (sorted by child ensures parent done first
-        # because in a rooted tree child > parent when joints sorted by child).
-        for j_idx, jnt in enumerate(joints):
-            p       = jnt.parent
-            c       = jnt.child
-            code    = _type_code(jnt.type)
+        Returns
+        -------
+        sym.Matrix (3,3)
+        """
+        return skew(omega_p) * U_j
 
-            A_p     = A_abs[p]                                   # already computed
-            r_p     = r_abs[p]
+    @staticmethod
+    def _udot_floating(omega_p: sym.Matrix, U_j: sym.Matrix) -> sym.Matrix:
+        """Time derivative of the F-joint basis in the global frame.
 
-            # Local geometry vectors (already sym.Matrix(3,1) via Joint3D.__post_init__)
-            p2j     = jnt.parent_cg_to_joint_vec                 # parent frame
-            j2c     = jnt.joint_to_child_cg_vec                  # child frame
+        The floating basis is 3×6 (translation | rotation columns), both
+        spanned by A_p::
 
-            # ---- absolute rotation: A_abs[child] = A_p * Arel[j] ----
-            A_abs[c]    = MatMul(A_p, Arel[j_idx], evaluate=False)
+            U_j = [A_p | A_p]              (3x6)
+            Udot_j = skew(omega_p) * U_j   (3x6)
 
-            # ---- joint global point: rJ = r_p + A_p * p2j ----
-            rJ[j_idx]   = r_p + MatMul(A_p, p2j, evaluate=False)
+        Parameters
+        ----------
+        omega_p : sym.Matrix (3,1)
+            Absolute angular velocity of the parent body.
+        U_j : sym.Matrix (3,6)
+            Current joint basis.
 
-            # ---- translation term for prismatic / cylindrical ----
-            trans_term = sym.zeros(3, 1)
-            if code == "P":
-                u_local     = jnt.axis_u_vec
-                s_val       = q[self.q_slices[j_idx].start, 0]
-                trans_term  = MatMul(A_p, u_local * s_val, evaluate=False)
+        Returns
+        -------
+        sym.Matrix (3,6)
+        """
+        return skew(omega_p) * U_j
 
-            elif code == "C":
-                u_local     = jnt.axis_u_vec
-                # Cylindrical: DOFs are [theta, s]; translational is the 2nd
-                s_val       = q[self.q_slices[j_idx].start + 1, 0]
-                trans_term  = MatMul(A_p, u_local * s_val, evaluate=False)
-                
-            elif code == "F":
-                # Floating: first 3 DOFs are translational (x, y, z) in parent frame
-                sl          = self.q_slices[j_idx]
-                t_vec       = sym.Matrix([q[sl.start + i, 0] for i in range(3)])
-                rJ[j_idx]   = MatMul(A_p, t_vec, evaluate=False)
-
-            # ---- child CG: r_abs[c] = rJ + A_c * j2c + trans_term ----
-            r_abs[c] = rJ[j_idx] + MatMul(A_abs[c], j2c, evaluate=False) + trans_term
-
-            # ---- axis / basis in global frame ----
-            if code in ("R", "P", "C"):
-                U[j_idx]    = MatMul(A_p, jnt.axis_u_vec, evaluate=False)
-
-            elif code == "U":
-                A_u1[j_idx] = MatrixSymbol(f"A_u1_{j_idx}", 3, 3)
-
-                u1_g        = MatMul(A_p, jnt.axis_u1_vec, evaluate=False)
-                u2_g        = MatMul(A_p, A_u1[j_idx], jnt.axis_u2_vec, evaluate=False)
-
-                Uj          = sym.zeros(3, 2)
-                Uj[:, 0]    = sym.Matrix(u1_g)
-                Uj[:, 1]    = sym.Matrix(u2_g)
-                U[j_idx]    = Uj
-
-            elif code == "S":
-                # Basis = parent frame columns
-                U[j_idx]    = MatMul(A_p, sym.eye(3), evaluate=False)
-
-            elif code == "F":
-                # 3x6: [A_p | A_p] — first 3 cols translation basis, last 3 rotation
-                U[j_idx]    = MatMul(
-                                    A_p,
-                                    sym.Matrix.hstack(sym.eye(3), sym.eye(3)),
-                                    evaluate=False,
-                )
-            else:
-                raise ValueError(f"Unsupported joint code {code!r} in cache builder.")
-
-        return KinematicsCache3D(
-            A_abs=A_abs,
-            A_u1=A_u1,
-            r_abs=r_abs,
-            rJ=rJ,
-            U=U,
-            Arel=Arel,
-            parent_of_body=parent_of_body,
-            joint_of_body=joint_of_body,
-        )
-
-    # ---- rate kinematics ----
+    # -------------------- rate cache --------------------
 
     def build_rate_cache_symbolic(
         self,
@@ -575,20 +476,20 @@ class VelocityTransformation3D:
                 omega_c = omega_p + U_j_s * qd_s
                 v_c     = vJ[j_idx] + skew(omega_c) * sym.Matrix(
                               cache.r_abs[c] - cache.rJ[j_idx])
-                Udot[j_idx] = _basis_time_derivative(omega_p, U_j_s)
+                Udot[j_idx] = self._udot_spherical(omega_p, U_j_s)
 
             elif code == "F":
                 # U_j = [A_p | A_p]  (3×6)
-                U_j_f   = sym.Matrix(cache.U[j_idx])           # 3×6
+                U_j_f       = sym.Matrix(cache.U[j_idx])           # 3×6
                 # translational DOFs are the first 3 speed entries
-                qd_t    = sym.Matrix([qd[col_sl.start + i, 0] for i in range(3)])
+                qd_t        = sym.Matrix([qd[col_sl.start + i, 0] for i in range(3)])
                 # rotational DOFs are the last 3 speed entries
-                qd_r    = sym.Matrix([qd[col_sl.start + 3 + i, 0] for i in range(3)])
-                A_p     = sym.Matrix(cache.A_abs[p])
-                omega_c = omega_p + A_p * qd_r
+                qd_r        = sym.Matrix([qd[col_sl.start + 3 + i, 0] for i in range(3)])
+                A_p         = sym.Matrix(cache.A_abs[p])
+                omega_c     = omega_p + A_p * qd_r
                 vJ[j_idx]   = A_p * qd_t # Overwrite vJ for F-joint to make the joint be coincident with the child CG
                 v_c         = vJ[j_idx] # + skew(omega_c) * sym.Matrix(cache.r_abs[c] - cache.rJ[j_idx]) NOTE: commented out, but to be checked.
-                Udot[j_idx] = _basis_time_derivative(omega_p, U_j_f)
+                Udot[j_idx] = self._udot_floating(omega_p, U_j_f)
 
             else:
                 raise ValueError(
@@ -605,185 +506,104 @@ class VelocityTransformation3D:
             Udot=Udot,
         )
 
-    # ==================== Symbolic Block Assembly ==============================
-    # Per-block formulas (now in helper as _block_B_sym / _block_Bdot_sym),
-    # block-dict builders, scatter assemblers, and block-printing helpers.
-
-    # ---- block dicts ----
-
-    def build_B_blocks_symbolic(
+    def _get_block_rate_kinematics(
         self,
-        q: sym.Matrix,
-        cache: Optional[KinematicsCache3D] = None,
-    ) -> dict[WritePair, SymbolicBBlock]:
-        """Build all symbolic B blocks indexed by ``(body_id, joint_index)``.
-
-        Each block retains the compact kinematic ingredients (``d_kj``, ``U_j``)
-        alongside the 6×m block matrix, enabling symbolic inspection without
-        having to assemble the full system matrix.
+        cache: KinematicsCache3D,
+        rate_cache: KinematicsRateCache3D,
+        k: int,
+        j: int,
+    ) -> BlockRateKinematics3D:
+        """Extract rate-kinematic quantities for block (k, j) from the rate cache.
 
         Parameters
         ----------
-        q : sympy.Matrix (total_cfg_dof, 1)
-            Internal configuration vector.
-        cache : KinematicsCache3D, optional
-            Pre-built kinematics cache.
+        cache : KinematicsCache3D
+            Position-level cache (unused here but provided for API consistency).
+        rate_cache : KinematicsRateCache3D
+            Rate cache built by :meth:`build_rate_cache_symbolic`.
+        k : int
+            Body index (1..NBodies).
+        j : int
+            Joint index (0..NJoints-1).
 
         Returns
         -------
-        dict[(int, int), SymbolicBBlock]
-            Mapping from ``(k, j)`` write-pair to the corresponding block.
+        BlockRateKinematics3D
+            Contains ``d_dot_kj = v_abs[k] - vJ[j]`` and ``U_dot_j`` as
+            explicit ``sym.Matrix`` objects, ready for Bdot block assembly.
         """
-        if cache is None:
-            cache = self.build_cache_symbolic(q)
+        d_dot_kj = sym.Matrix(rate_cache.v_abs[k] - rate_cache.vJ[j])
+        U_dot_j  = sym.Matrix(rate_cache.Udot[j])
+        return BlockRateKinematics3D(
+            body_id=k, joint_index=j, d_dot_kj=d_dot_kj, U_dot_j=U_dot_j
+        )
 
-        joints = self.joint_system.joints
-        blocks: dict[WritePair, SymbolicBBlock] = {}
-
-        self.reset_Btrack()
-        for k, j in self.iter_write_pairs_root_to_leaf():
-            code = _type_code(joints[j].type)
-            bk   = _get_block_kinematics(cache, k, j)
-            mat  = _block_B_sym(code, bk.d_kj, bk.U_j)
-            r0   = 6 * (k - 1)
-            blocks[(k, j)] = SymbolicBBlock(
-                body_id=k,
-                joint_index=j,
-                joint_type=code,
-                row_slice=slice(r0, r0 + 6),
-                col_slice=self.col_slices[j],
-                d_kj=bk.d_kj,
-                U_j=bk.U_j,
-                matrix=mat,
-            )
-        return blocks
-
-    def build_Bdot_blocks_symbolic(
+    def _block_B(
         self,
-        q: sym.Matrix,
-        qd: sym.Matrix,
-        cache: Optional[KinematicsCache3D] = None,
-        rate_cache: Optional[KinematicsRateCache3D] = None,
-    ) -> dict[WritePair, SymbolicBdotBlock]:
-        """Build all symbolic Bdot blocks indexed by ``(body_id, joint_index)``.
-
-        Each block retains compact kinematic ingredients alongside the 6×m
-        Bdot block matrix.
+        joint: "Joint3D",
+        d_kj: sym.Matrix,
+        U_j: sym.Matrix,
+    ) -> sym.Matrix:
+        """Return the 6 x m symbolic B block for body k / joint j.
 
         Parameters
         ----------
-        q : sympy.Matrix (total_cfg_dof, 1)
-            Internal configuration vector.
-        qd : sympy.Matrix (total_dof, 1)
-            Generalized speed vector.
-        cache : KinematicsCache3D, optional
-            Pre-built kinematics cache.
-        rate_cache : KinematicsRateCache3D, optional
-            Pre-built rate cache.
+        joint : Joint3D
+            The joint object (used only for its type).
+        d_kj : sympy.Matrix (3, 1)
+            Position vector from joint j to body k CG, in the global frame.
+        U_j : sympy.Matrix (3, m)
+            Joint axis / basis expressed in the global frame (from the cache).
 
         Returns
         -------
-        dict[(int, int), SymbolicBdotBlock]
-            Mapping from ``(k, j)`` write-pair to the corresponding Bdot block.
+        sympy.Matrix (6, m)
+            The velocity-transformation block::
+
+                R:  [[-skew(d)*u], [u]]           6x1
+                P:  [[u], [0_3x1]]                6x1
+                S:  [[-skew(d)], [I]]             6x3
+                U:  [[-skew(d)*U], [U]]           6x2
+                C:  [[-skew(d)*u, u], [u, 0]]     6x2
+                F:  [[I, -skew(d)], [0, I]]       6x6
         """
-        if cache is None:
-            cache = self.build_cache_symbolic(q)
-        if rate_cache is None:
-            rate_cache = self.build_rate_cache_symbolic(q, qd, cache=cache)
+        code    = _type_code(joint.type)
+        d_tilde = skew(d_kj)
+        I3      = sym.eye(3)
+        Z3      = sym.zeros(3)
 
-        joints = self.joint_system.joints
-        blocks: dict[WritePair, SymbolicBdotBlock] = {}
+        if code == "R":
+            # U_j is 3x1
+            return sym.Matrix.vstack(-d_tilde * U_j, U_j)
 
-        self.reset_Btrack()
-        for k, j in self.iter_write_pairs_root_to_leaf():
-            code = _type_code(joints[j].type)
-            bk   = _get_block_kinematics(cache, k, j)
-            brk  = _get_block_rate_kinematics(cache, rate_cache, k, j)
-            mat  = _block_Bdot_sym(code, bk.d_kj, brk.d_dot_kj, bk.U_j, brk.U_dot_j)
-            r0   = 6 * (k - 1)
-            blocks[(k, j)] = SymbolicBdotBlock(
-                body_id=k,
-                joint_index=j,
-                joint_type=code,
-                row_slice=slice(r0, r0 + 6),
-                col_slice=self.col_slices[j],
-                d_kj=bk.d_kj,
-                U_j=bk.U_j,
-                d_dot_kj=brk.d_dot_kj,
-                U_dot_j=brk.U_dot_j,
-                matrix=mat,
-            )
-        return blocks
+        if code == "P":
+            # U_j is 3x1
+            return sym.Matrix.vstack(U_j, sym.zeros(3, 1))
 
-    # ---- assembly from block dicts ------------------------------------------
+        if code == "S":
+            # 6x3: [[-skew(d)], [I]]
+            return sym.Matrix.vstack(-d_tilde, I3)
 
-    def assemble_B_from_blocks(
-        self,
-        blocks: dict[WritePair, SymbolicBBlock],
-    ) -> sym.Matrix:
-        """Scatter pre-built B blocks into the full system matrix.
+        if code == "U":
+            # U_j is 3x2
+            return sym.Matrix.vstack(-d_tilde * U_j, U_j)
 
-        Parameters
-        ----------
-        blocks : dict[(int, int), SymbolicBBlock]
-            As returned by :meth:`build_B_blocks_symbolic`.
-        """
-        B = sym.zeros(6 * self.NBodies, self.total_dof)
-        for blk in blocks.values():
-            B[blk.row_slice, blk.col_slice.start:blk.col_slice.stop] = blk.matrix
-        return B
+        if code == "C":
+            # U_j is 3x1 (single axis); DOFs = [rotation, translation]
+            u   = U_j
+            top = sym.Matrix.hstack(-d_tilde * u, u)
+            bot = sym.Matrix.hstack(u, sym.zeros(3, 1))
+            return sym.Matrix.vstack(top, bot)
 
-    def assemble_Bdot_from_blocks(
-        self,
-        blocks: dict[WritePair, SymbolicBdotBlock],
-    ) -> sym.Matrix:
-        """Scatter pre-built Bdot blocks into the full system matrix.
+        if code == "F":
+            # 6x6: [[I, -skew(d)], [0, I]]
+            top = sym.Matrix.hstack(I3, -d_tilde)
+            bot = sym.Matrix.hstack(Z3, I3)
+            return sym.Matrix.vstack(top, bot)
 
-        Parameters
-        ----------
-        blocks : dict[(int, int), SymbolicBdotBlock]
-            As returned by :meth:`build_Bdot_blocks_symbolic`.
-        """
-        Bdot = sym.zeros(6 * self.NBodies, self.total_dof)
-        for blk in blocks.values():
-            Bdot[blk.row_slice, blk.col_slice.start:blk.col_slice.stop] = blk.matrix
-        return Bdot
+        raise ValueError(f"Unsupported joint code {code!r} in _block_B.")
 
-    # ---- block inspection / printing ----
-
-    @staticmethod
-    def print_B_blocks(
-        blocks: "dict[WritePair, SymbolicBBlock]",
-        *,
-        simplify: bool = False,
-        show_matrix: bool = True,
-    ) -> None:
-        """Print a human-readable summary of all symbolic B blocks.
-
-        Delegates to :class:`BlockInspector`.  For richer options (e.g.
-        ``show_matrix=False`` or ``simplify=True``) call
-        ``BlockInspector.display_B_blocks`` directly.
-        """
-        BlockInspector.display_B_blocks(
-            blocks, simplify=simplify, show_matrix=show_matrix,
-        )
-
-    @staticmethod
-    def print_Bdot_blocks(
-        blocks: "dict[WritePair, SymbolicBdotBlock]",
-        *,
-        simplify: bool = False,
-        show_matrix: bool = True,
-    ) -> None:
-        """Print a human-readable summary of all symbolic Bdot blocks.
-
-        Delegates to :class:`BlockInspector`.
-        """
-        BlockInspector.display_Bdot_blocks(
-            blocks, simplify=simplify, show_matrix=show_matrix,
-        )
-
-    # ==================== Symbolic Full Assembly ================================
+    # -------------------- symbolic B assembly --------------------
 
     def assemble_B_symbolic(
         self,
@@ -791,9 +611,6 @@ class VelocityTransformation3D:
         cache: Optional[KinematicsCache3D] = None,
     ) -> sym.Matrix:
         """Assemble the full symbolic velocity-transformation matrix B.
-
-        Delegates to :meth:`build_B_blocks_symbolic` and
-        :meth:`assemble_B_from_blocks`.
 
         Parameters
         ----------
@@ -807,8 +624,101 @@ class VelocityTransformation3D:
         sympy.Matrix, shape ``(6*NBodies, total_dof)``
             Body *k* (1..NBodies) occupies rows ``6*(k-1) .. 6*(k-1)+5``.
         """
-        blocks = self.build_B_blocks_symbolic(q, cache=cache)
-        return self.assemble_B_from_blocks(blocks)
+        if cache is None:
+            cache = self.build_cache_symbolic(q)
+
+        # Unpack and initialize
+        NB      = self.NBodies
+        n_rows  = 6 * NB
+        B       = sym.zeros(n_rows, self.total_dof)
+        joints  = self.joint_system.joints
+
+        # Reset Btrack so iter_write_pairs_root_to_leaf starts clean.
+        self.reset_Btrack()
+
+        for k, j in self.iter_write_pairs_root_to_leaf():
+            bk      = self._get_block_kinematics(cache, k, j)
+            block   = self._block_B(joints[j], bk.d_kj, bk.U_j)
+
+            # Row slice for body k (body k=1 starts at row 0)
+            r0 = 6 * (k - 1)
+            c0 = self.col_slices[j].start
+            c1 = self.col_slices[j].stop
+
+            B[r0:r0 + 6, c0:c1] = block
+
+        return B
+
+    # -------------------- Bdot block helpers --------------------
+
+    def _block_Bdot(
+        self,
+        joint: "Joint3D",
+        d_kj: sym.Matrix,
+        d_dot_kj: sym.Matrix,
+        U_j: sym.Matrix,
+        U_dot_j: sym.Matrix,
+    ) -> sym.Matrix:
+        """Return the 6 x m symbolic Bdot block for body k / joint j.
+
+        Parameters
+        ----------
+        joint : Joint3D
+            The joint object (used only for its type).
+        d_kj : sympy.Matrix (3, 1)
+            Position vector from joint j to body k CG, in the global frame.
+        d_dot_kj : sympy.Matrix (3, 1)
+            Time derivative of d_kj.
+        U_j : sympy.Matrix (3, m)
+            Joint axis / basis in the global frame.
+        U_dot_j : sympy.Matrix (3, m)
+            Time derivative of U_j.
+
+        Returns
+        -------
+        sympy.Matrix (6, m)
+        """
+        code = _type_code(joint.type)
+
+        if code == "R":
+            # 6x1
+            top = -skew(d_dot_kj) * U_j - skew(d_kj) * U_dot_j
+            return sym.Matrix.vstack(top, U_dot_j)
+
+        if code == "P":
+            # 6x1
+            return sym.Matrix.vstack(U_dot_j, sym.zeros(3, 1))
+
+        if code == "U":
+            # 6x2
+            top = -skew(d_dot_kj) * U_j - skew(d_kj) * U_dot_j
+            return sym.Matrix.vstack(top, U_dot_j)
+
+        if code == "C":
+            # U_j is 3x1 (single axis); DOFs = [rotation, translation]
+            u     = U_j
+            u_dot = U_dot_j
+            top = sym.Matrix.hstack(
+                -skew(d_dot_kj) * u - skew(d_kj) * u_dot, u_dot
+            )
+            bot = sym.Matrix.hstack(u_dot, sym.zeros(3, 1))
+            return sym.Matrix.vstack(top, bot)
+
+        if code == "S":
+            # B = vstack(-skew(d_kj), I) → Bdot = vstack(-skew(d_dot_kj), 0)
+            return sym.Matrix.vstack(-skew(d_dot_kj), sym.zeros(3, 3))
+
+        if code == "F":
+            # B = [[I, -skew(d)], [0, I]]
+            # Bdot = [[0, -skew(d_dot)], [0, 0]]
+            Z3 = sym.zeros(3)
+            top = sym.Matrix.hstack(Z3, -skew(d_dot_kj))
+            bot = sym.Matrix.hstack(Z3, Z3)
+            return sym.Matrix.vstack(top, bot)
+
+        raise ValueError(f"Unsupported joint code {code!r} in _block_Bdot.")
+
+    # -------------------- symbolic Bdot assembly --------------------
 
     def assemble_Bdot_symbolic(
         self,
@@ -818,9 +728,6 @@ class VelocityTransformation3D:
         rate_cache: Optional[KinematicsRateCache3D] = None,
     ) -> sym.Matrix:
         """Assemble the full symbolic Bdot matrix from per-block formulas.
-
-        Delegates to :meth:`build_Bdot_blocks_symbolic` and
-        :meth:`assemble_Bdot_from_blocks`.
 
         Parameters
         ----------
@@ -837,159 +744,39 @@ class VelocityTransformation3D:
         -------
         sympy.Matrix, shape ``(6*NBodies, total_dof)``
         """
-        blocks = self.build_Bdot_blocks_symbolic(
-            q, qd, cache=cache, rate_cache=rate_cache,
-        )
-        return self.assemble_Bdot_from_blocks(blocks)
+        if cache is None:
+            cache = self.build_cache_symbolic(q)
+        if rate_cache is None:
+            rate_cache = self.build_rate_cache_symbolic(q, qd, cache=cache)
 
-    # ==================== JAX Runtime Wrappers ==================================
-    # ``build_numeric_params`` converts joint-system geometry to NumPy once
-    # and returns an immutable ``NumericModelParams`` that is consumed by both
-    # the JAX evaluators below and by ``compile_B_lambdified``.
-    # ``evaluate_B/Bdot_jax``       -- eager, one-shot evaluation
-    # ``build_B/Bdot_evaluator_jax`` -- JIT-compiled closures for repeated use
-
-    def build_numeric_params(self) -> NumericModelParams:
-        """Extract constant geometry from the joint system as NumPy arrays.
-
-        The returned object is immutable and can be reused across many calls
-        to :meth:`evaluate_B_jax` and :meth:`compile_B_lambdified`.
-        """
+        NB     = self.NBodies
+        n_rows = 6 * NB
+        Bdot   = sym.zeros(n_rows, self.total_dof)
         joints = self.joint_system.joints
 
-        def _to_np(v):
-            if v is None:
-                return None
-            return np.array(v.tolist(), dtype=float).reshape(3, 1)
+        self.reset_Btrack()
 
-        return NumericModelParams(
-            n_bodies=self.NBodies,
-            n_joints=self.NJoints,
-            total_dof=self.total_dof,
-            total_cfg_dof=self.total_cfg_dof,
-            parent=[j.parent for j in joints],
-            child=[j.child for j in joints],
-            code=[_type_code(j.type) for j in joints],
-            p2j=[_to_np(j.parent_cg_to_joint_vec) for j in joints],
-            j2c=[_to_np(j.joint_to_child_cg_vec) for j in joints],
-            u=[_to_np(j.axis_u_vec) for j in joints],
-            u1=[_to_np(j.axis_u1_vec) for j in joints],
-            u2=[_to_np(j.axis_u2_vec) for j in joints],
-            col_slices=list(self.col_slices),
-            cfg_slices=list(self.q_slices),
-        )
+        for k, j in self.iter_write_pairs_root_to_leaf():
+            bk  = self._get_block_kinematics(cache, k, j)
+            brk = self._get_block_rate_kinematics(cache, rate_cache, k, j)
 
-    def evaluate_B_jax(
-        self,
-        q_int,
-        params: Optional["NumericModelParams"] = None,
-    ):
-        """Evaluate B using the JAX backend (not JIT-compiled by default).
+            block = self._block_Bdot(
+                joints[j],
+                bk.d_kj,
+                brk.d_dot_kj,
+                bk.U_j,
+                brk.U_dot_j,
+            )
 
-        For repeated evaluations prefer :meth:`build_B_evaluator_jax` which
-        returns a ``jax.jit``-compiled callable.
+            r0 = 6 * (k - 1)
+            c0 = self.col_slices[j].start
+            c1 = self.col_slices[j].stop
 
-        Parameters
-        ----------
-        q_int : array_like, shape ``(total_cfg_dof,)``
-        params : NumericModelParams, optional
+            Bdot[r0:r0 + 6, c0:c1] = block
 
-        Returns
-        -------
-        jnp.ndarray, shape ``(6*NBodies, total_dof)``
-        """
-        from ._velocity_transformation_helper import evaluate_B_jax as _eval_B, _convert_geometry_to_jax
-        import jax.numpy as jnp
+        return Bdot
 
-        if params is None:
-            params = self.build_numeric_params()
-
-        kw = _convert_geometry_to_jax(params)
-        kw["body_paths"] = self.body_paths
-        kw["joint_paths"] = self.joint_paths
-        return _eval_B(jnp.asarray(q_int, dtype=float), **kw)
-
-    def evaluate_Bdot_jax(
-        self,
-        q_int,
-        qd,
-        params: Optional["NumericModelParams"] = None,
-    ):
-        """Evaluate Bdot using the JAX backend (not JIT-compiled by default).
-
-        For repeated evaluations prefer :meth:`build_Bdot_evaluator_jax`.
-
-        Parameters
-        ----------
-        q_int : array_like, shape ``(total_cfg_dof,)``
-        qd : array_like, shape ``(total_dof,)``
-        params : NumericModelParams, optional
-
-        Returns
-        -------
-        jnp.ndarray, shape ``(6*NBodies, total_dof)``
-        """
-        from ._velocity_transformation_helper import evaluate_Bdot_jax as _eval_Bdot, _convert_geometry_to_jax
-        import jax.numpy as jnp
-
-        if params is None:
-            params = self.build_numeric_params()
-
-        kw = _convert_geometry_to_jax(params)
-        kw["body_paths"] = self.body_paths
-        kw["joint_paths"] = self.joint_paths
-        return _eval_Bdot(jnp.asarray(q_int, dtype=float),
-                          jnp.asarray(qd, dtype=float), **kw)
-
-    def build_B_evaluator_jax(
-        self,
-        params: Optional["NumericModelParams"] = None,
-    ) -> callable:
-        """Return a ``jax.jit``-compiled callable ``f(q_int) -> B``.
-
-        The topology and constant geometry are baked into the compiled
-        XLA computation.  Only ``q_int`` is a dynamic argument.
-
-        Parameters
-        ----------
-        params : NumericModelParams, optional
-
-        Returns
-        -------
-        callable
-            ``f(q_int: jnp.ndarray) -> jnp.ndarray``
-        """
-        from ._velocity_transformation_helper import make_B_evaluator
-
-        if params is None:
-            params = self.build_numeric_params()
-        return make_B_evaluator(params, self.body_paths, self.joint_paths)
-
-    def build_Bdot_evaluator_jax(
-        self,
-        params: Optional["NumericModelParams"] = None,
-    ) -> callable:
-        """Return a ``jax.jit``-compiled callable ``f(q_int, qd) -> Bdot``.
-
-        Parameters
-        ----------
-        params : NumericModelParams, optional
-
-        Returns
-        -------
-        callable
-            ``f(q_int: jnp.ndarray, qd: jnp.ndarray) -> jnp.ndarray``
-        """
-        from ._velocity_transformation_helper import make_Bdot_evaluator
-
-        if params is None:
-            params = self.build_numeric_params()
-        return make_Bdot_evaluator(params, self.body_paths, self.joint_paths)
-
-    # ==================== Symbolic Compilation / Debug ========================
-    # ``compile_B_lambdified`` and ``compile_Bdot_lambdified`` substitute
-    # explicit rotation matrices into the symbolic result, then CSE-lambdify
-    # to a fast NumPy callable.  Useful for validation and symbolic export.
+    # -------------------- compilation --------------------
 
     def compile_B_lambdified(self, q_syms: sym.Matrix) -> callable:
         """Compile the velocity-transformation matrix **B** to a fast NumPy callable.
@@ -1233,6 +1020,141 @@ class VelocityTransformation3D:
 
         return Bdot_func
 
+    # -------------------- symbolic kinematics cache --------------------
+
+    def build_cache_symbolic(self, q: sym.Matrix) -> KinematicsCache3D:
+        """Build a symbolic kinematics cache (no B assembly).
+
+        Parameters
+        ----------
+        q : sympy.Matrix
+            Internal configuration vector, shape ``(total_cfg_dof, 1)``.
+            Must be consistent with ``self.q_slices`` (cfg_col_slice).
+
+        Returns
+        -------
+        KinematicsCache3D
+            Symbolic cache with ``A_abs``, ``r_abs``, ``rJ``, ``U``, ``Arel``.
+
+        Notes
+        -----
+        * Relative rotations are *opaque*: ``Arel[j] = MatrixSymbol(...)``.
+        * All products use ``MatMul(..., evaluate=False)`` to suppress expansion.
+        * Prismatic / cylindrical translation terms use the translational DOF
+          extracted from *q* via ``self.q_slices``.
+        """
+        q = sym.Matrix(q)
+        if q.shape != (self.total_cfg_dof, 1):
+            raise ValueError(
+                f"q shape mismatch: expected ({self.total_cfg_dof}, 1), got {q.shape}."
+            )
+
+        joints  = self.joint_system.joints
+        NB      = self.NBodies
+        NJ      = self.NJoints
+        I3      = Identity(3)
+
+        # parent / joint-of-body arrays from joint_system
+        parent_of_body: List[int]   = list(self.joint_system.parent_body_of_body)
+        joint_of_body: List[int]    = list(self.joint_system.parent_joint_of_body)
+
+        # Opaque relative rotations
+        Arel: List[MatrixSymbol] = [
+            MatrixSymbol(f"Arel_{j}", 3, 3) for j in range(NJ)
+        ]
+
+        # Absolute rotations & positions (indexed by body id 0..NBodies)
+        A_abs: List[Any]    = [None] * (NB + 1)
+        A_u1:  List[Any]    = [None] * NJ
+        r_abs: List[Any]    = [None] * (NB + 1)
+        A_abs[0]            = I3
+        r_abs[0]            = sym.zeros(3, 1)
+
+        # Joint quantities (indexed by joint index 0..NJ-1)
+        rJ: List[Any]   = [None] * NJ
+        U: List[Any]    = [None] * NJ
+
+        # Process joints in topological order (sorted by child ensures parent done first
+        # because in a rooted tree child > parent when joints sorted by child).
+        for j_idx, jnt in enumerate(joints):
+            p       = jnt.parent
+            c       = jnt.child
+            code    = _type_code(jnt.type)
+
+            A_p     = A_abs[p]                                   # already computed
+            r_p     = r_abs[p]
+
+            # Local geometry vectors (already sym.Matrix(3,1) via Joint3D.__post_init__)
+            p2j     = jnt.parent_cg_to_joint_vec                 # parent frame
+            j2c     = jnt.joint_to_child_cg_vec                  # child frame
+
+            # ---- absolute rotation: A_abs[child] = A_p * Arel[j] ----
+            A_abs[c]    = MatMul(A_p, Arel[j_idx], evaluate=False)
+
+            # ---- joint global point: rJ = r_p + A_p * p2j ----
+            rJ[j_idx]   = r_p + MatMul(A_p, p2j, evaluate=False)
+
+            # ---- translation term for prismatic / cylindrical ----
+            trans_term = sym.zeros(3, 1)
+            if code == "P":
+                u_local     = jnt.axis_u_vec
+                s_val       = q[self.q_slices[j_idx].start, 0]
+                trans_term  = MatMul(A_p, u_local * s_val, evaluate=False)
+
+            elif code == "C":
+                u_local     = jnt.axis_u_vec
+                # Cylindrical: DOFs are [theta, s]; translational is the 2nd
+                s_val       = q[self.q_slices[j_idx].start + 1, 0]
+                trans_term  = MatMul(A_p, u_local * s_val, evaluate=False)
+                
+            elif code == "F":
+                # Floating: first 3 DOFs are translational (x, y, z) in parent frame
+                sl          = self.q_slices[j_idx]
+                t_vec       = sym.Matrix([q[sl.start + i, 0] for i in range(3)])
+                rJ[j_idx]   = MatMul(A_p, t_vec, evaluate=False)
+
+            # ---- child CG: r_abs[c] = rJ + A_c * j2c + trans_term ----
+            r_abs[c] = rJ[j_idx] + MatMul(A_abs[c], j2c, evaluate=False) + trans_term
+
+            # ---- axis / basis in global frame ----
+            if code in ("R", "P", "C"):
+                U[j_idx]    = MatMul(A_p, jnt.axis_u_vec, evaluate=False)
+
+            elif code == "U":
+                A_u1[j_idx] = MatrixSymbol(f"A_u1_{j_idx}", 3, 3)
+
+                u1_g        = MatMul(A_p, jnt.axis_u1_vec, evaluate=False)
+                u2_g        = MatMul(A_p, A_u1[j_idx], jnt.axis_u2_vec, evaluate=False)
+
+                Uj          = sym.zeros(3, 2)
+                Uj[:, 0]    = sym.Matrix(u1_g)
+                Uj[:, 1]    = sym.Matrix(u2_g)
+                U[j_idx]    = Uj
+
+            elif code == "S":
+                # Basis = parent frame columns
+                U[j_idx]    = MatMul(A_p, sym.eye(3), evaluate=False)
+
+            elif code == "F":
+                # 3x6: [A_p | A_p] — first 3 cols translation basis, last 3 rotation
+                U[j_idx]    = MatMul(
+                                    A_p,
+                                    sym.Matrix.hstack(sym.eye(3), sym.eye(3)),
+                                    evaluate=False,
+                )
+            else:
+                raise ValueError(f"Unsupported joint code {code!r} in cache builder.")
+
+        return KinematicsCache3D(
+            A_abs=A_abs,
+            A_u1=A_u1,
+            r_abs=r_abs,
+            rJ=rJ,
+            U=U,
+            Arel=Arel,
+            parent_of_body=parent_of_body,
+            joint_of_body=joint_of_body,
+        )
 
 ################### Section for pytest ###############################
 # ------------------------- minimal test/demo -------------------------

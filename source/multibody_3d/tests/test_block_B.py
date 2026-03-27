@@ -1,16 +1,22 @@
 # source/multibody_3d/tests/test_block_B.py
-"""Tests for skew() and VelocityTransformation3D._block_B()."""
+"""Tests for skew(), _block_B_sym(), and _block_Bdot_sym()."""
 import pytest
 import sympy as sym
 
 try:
     from multibody_3d import JointSystem3D, VelocityTransformation3D
     from multibody_3d.multibody_core.velocity_transformation_3d import skew
+    from multibody_3d.multibody_core._velocity_transformation_helper import (
+        _block_B_sym, _block_Bdot_sym, _type_code,
+    )
 except Exception:  # pragma: no cover
     import sys as _sys
     _sys.path.insert(0, ".")
     from source.multibody_3d import JointSystem3D, VelocityTransformation3D
     from source.multibody_3d.multibody_core.velocity_transformation_3d import skew
+    from source.multibody_3d.multibody_core._velocity_transformation_helper import (
+        _block_B_sym, _block_Bdot_sym, _type_code,
+    )
 
 
 def _make(data: dict) -> VelocityTransformation3D:
@@ -81,7 +87,7 @@ def test_block_B_shape(jtype, ndof, expected_shape, axes):
     # For types with opaque MatMul U, convert to explicit matrix for block
     U_explicit = sym.Matrix(U_j) if not isinstance(U_j, sym.Matrix) else U_j
 
-    block = vt._block_B(joint, d, U_explicit)
+    block = _block_B_sym(_type_code(joint.type), d, U_explicit)
     assert block.shape == expected_shape, f"{jtype}: got {block.shape}, expected {expected_shape}"
 
 
@@ -102,7 +108,7 @@ def test_spherical_block_content():
     joint = vt.joint_system.joints[0]
     d = sym.Matrix(sym.symbols("dx dy dz"))
 
-    block = vt._block_B(joint, d, sym.eye(3))  # U_j unused for S
+    block = _block_B_sym(_type_code(joint.type), d, sym.eye(3))  # U_j unused for S
     expected = sym.Matrix.vstack(-skew(d), sym.eye(3))
     assert block == expected
 
@@ -128,7 +134,7 @@ def test_revolute_block_content():
     u = sym.Matrix([0, 0, 1])
     d = sym.Matrix(sym.symbols("dx dy dz"))
 
-    block = vt._block_B(joint, d, u)
+    block = _block_B_sym(_type_code(joint.type), d, u)
 
     expected_top = -skew(d) * u
     expected_bot = u
@@ -157,7 +163,7 @@ def test_prismatic_block_content():
     u = sym.Matrix([1, 0, 0])
     d = sym.Matrix(sym.symbols("dx dy dz"))
 
-    block = vt._block_B(joint, d, u)
+    block = _block_B_sym(_type_code(joint.type), d, u)
     expected = sym.Matrix.vstack(u, sym.zeros(3, 1))
     assert block == expected
 
@@ -184,7 +190,7 @@ def test_floating_block_content():
     # U_j unused for F (block ignores it), pass dummy
     U_dummy = sym.eye(3)
 
-    block = vt._block_B(joint, d, U_dummy)
+    block = _block_B_sym(_type_code(joint.type), d, U_dummy)
     I3 = sym.eye(3)
     S = skew(d)
     expected = sym.Matrix.vstack(
