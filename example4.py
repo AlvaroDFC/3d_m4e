@@ -39,5 +39,6 @@ data = {
     ],
     "axis_u1": [None, None, None, None],
     "axis_u2": [None, None, None, None],
-    "rot_param": ['quat', None, None, None]
+    "rot_param": ['euler', None, None, None]
 }
+

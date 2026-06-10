@@ -1,6 +1,6 @@
 ﻿"""Consistency tests for the JAX B / Bdot evaluators.
 
-Compares ``evaluate_B_jax`` and ``evaluate_Bdot_jax`` against the
+Compares ``build_B_evaluator_jax`` and ``build_Bdot_evaluator_jax`` against the
 lambdified reference implementation (``compile_B_lambdified`` /
 ``compile_Bdot_lambdified``) across several topologies and joint-type
 combinations.
@@ -156,7 +156,7 @@ ALL_FIXTURE_NAMES = ["chain_RP", "chain_RPS", "chain_UCF", "branch_RR"]
 # ---------------------------------------------------------------------------
 
 class TestEvaluateBJaxMatchesLambdified:
-    """evaluate_B_jax must match compile_B_lambdified at random configurations."""
+    """build_B_evaluator_jax must match compile_B_lambdified at random configurations."""
 
     RTOL = 1e-10
     ATOL = 1e-10
@@ -165,12 +165,14 @@ class TestEvaluateBJaxMatchesLambdified:
     def test_random_configs(self, fixture_name, request):
         vt = request.getfixturevalue(fixture_name)
         B_ref_func = _build_B_ref(vt)
+        B_eval     = vt.build_B_evaluator_jax()
         rng = np.random.default_rng(42)
 
         for _ in range(5):
             q = _random_q_int(vt, rng)
             B_ref = B_ref_func(q)
-            B_jax = np.asarray(vt.evaluate_B_jax(q))
+            mnv   = np.concatenate([q, np.zeros(vt.total_dof)])
+            B_jax = np.asarray(B_eval(mnv))
             np.testing.assert_allclose(
                 B_jax, B_ref, rtol=self.RTOL, atol=self.ATOL,
                 err_msg=f"B mismatch on {fixture_name}",
@@ -185,7 +187,9 @@ class TestEvaluateBJaxShape:
         q = np.zeros(vt.total_cfg_dof)
         sl_s = vt.q_slices[2]
         q[sl_s.start] = 1.0
-        B = np.asarray(vt.evaluate_B_jax(q))
+        mnv = np.concatenate([q, np.zeros(vt.total_dof)])
+        B_eval = vt.build_B_evaluator_jax()
+        B = np.asarray(B_eval(mnv))
         assert B.shape == (6 * vt.NBodies, vt.total_dof)
 
 
@@ -194,7 +198,7 @@ class TestEvaluateBJaxShape:
 # ---------------------------------------------------------------------------
 
 class TestEvaluateBdotJaxMatchesLambdified:
-    """evaluate_Bdot_jax must match compile_Bdot_lambdified at random configurations."""
+    """build_Bdot_evaluator_jax must match compile_Bdot_lambdified at random configurations."""
 
     RTOL = 1e-10
     ATOL = 1e-10
@@ -203,13 +207,15 @@ class TestEvaluateBdotJaxMatchesLambdified:
     def test_random_configs(self, fixture_name, request):
         vt = request.getfixturevalue(fixture_name)
         Bdot_ref_func = _build_Bdot_ref(vt)
+        Bdot_eval     = vt.build_Bdot_evaluator_jax()
         rng = np.random.default_rng(99)
 
         for _ in range(3):
             q  = _random_q_int(vt, rng)
             qd = _random_qd(vt, rng)
             Bdot_ref = Bdot_ref_func(q, qd)
-            Bdot_jax = np.asarray(vt.evaluate_Bdot_jax(q, qd))
+            mnv      = np.concatenate([q, qd])
+            Bdot_jax = np.asarray(Bdot_eval(mnv))
             np.testing.assert_allclose(
                 Bdot_jax, Bdot_ref, rtol=self.RTOL, atol=self.ATOL,
                 err_msg=f"Bdot mismatch on {fixture_name}",
@@ -221,9 +227,9 @@ class TestEvaluateBdotJaxZeroSpeed:
 
     def test_zero_speed(self, chain_RP):
         vt = chain_RP
-        q  = np.zeros(vt.total_cfg_dof)
-        qd = np.zeros(vt.total_dof)
-        Bdot = np.asarray(vt.evaluate_Bdot_jax(q, qd))
+        mnv = np.zeros(vt.total_cfg_dof + vt.total_dof)
+        Bdot_eval = vt.build_Bdot_evaluator_jax()
+        Bdot = np.asarray(Bdot_eval(mnv))
         np.testing.assert_allclose(Bdot, 0.0, atol=1e-15)
 
 
@@ -245,10 +251,11 @@ class TestJITCompilation:
         B_ref  = _build_B_ref(vt)
 
         rng = np.random.default_rng(7)
-        q = _random_q_int(vt, rng)
+        q   = _random_q_int(vt, rng)
+        mnv = np.concatenate([q, np.zeros(vt.total_dof)])
 
-        B_jit1 = np.asarray(B_eval(q))
-        B_jit2 = np.asarray(B_eval(q))
+        B_jit1 = np.asarray(B_eval(mnv))
+        B_jit2 = np.asarray(B_eval(mnv))
         B_lam  = B_ref(q)
         np.testing.assert_allclose(B_jit1, B_lam,  rtol=self.RTOL, atol=self.ATOL)
         np.testing.assert_allclose(B_jit2, B_jit1, rtol=0, atol=0)
@@ -261,10 +268,11 @@ class TestJITCompilation:
         Bdot_ref  = _build_Bdot_ref(vt)
 
         rng = np.random.default_rng(11)
-        q  = _random_q_int(vt, rng)
-        qd = _random_qd(vt, rng)
+        q   = _random_q_int(vt, rng)
+        qd  = _random_qd(vt, rng)
+        mnv = np.concatenate([q, qd])
 
-        Bdot_jit = np.asarray(Bdot_eval(q, qd))
+        Bdot_jit = np.asarray(Bdot_eval(mnv))
         Bdot_lam = Bdot_ref(q, qd)
         np.testing.assert_allclose(Bdot_jit, Bdot_lam, rtol=self.RTOL, atol=self.ATOL)
 
@@ -277,24 +285,22 @@ class TestAutodiff:
     """Verify JAX autodiff runs without error on B evaluator."""
 
     def test_jacobian_B_runs(self, chain_RP):
-        """jax.jacobian(B)(q) should return a tensor without error."""
+        """jax.jacobian(B)(mainNumVars_int) should return a tensor without error."""
         vt = chain_RP
         params = vt.build_numeric_params()
         B_eval = vt.build_B_evaluator_jax(params)
 
-        q = jnp.zeros(vt.total_cfg_dof)
-        J = jax.jacobian(B_eval)(q)
-        assert J.shape == (6 * vt.NBodies, vt.total_dof, vt.total_cfg_dof)
+        mnv = jnp.zeros(vt.total_cfg_dof + vt.total_dof)
+        J = jax.jacobian(B_eval)(mnv)
+        assert J.shape == (6 * vt.NBodies, vt.total_dof, vt.total_cfg_dof + vt.total_dof)
 
     def test_jacobian_Bdot_runs(self, chain_RP):
-        """jax.jacobian(Bdot)(q, qd) should return without error."""
+        """jax.jacobian(Bdot)(mainNumVars_int) should return without error."""
         vt = chain_RP
         params = vt.build_numeric_params()
         Bdot_eval = vt.build_Bdot_evaluator_jax(params)
 
-        q  = jnp.zeros(vt.total_cfg_dof)
-        qd = jnp.zeros(vt.total_dof)
-        # Jacobian w.r.t. first argument (q_int)
-        J = jax.jacobian(Bdot_eval, argnums=0)(q, qd)
-        assert J.shape == (6 * vt.NBodies, vt.total_dof, vt.total_cfg_dof)
+        mnv = jnp.zeros(vt.total_cfg_dof + vt.total_dof)
+        J = jax.jacobian(Bdot_eval)(mnv)
+        assert J.shape == (6 * vt.NBodies, vt.total_dof, vt.total_cfg_dof + vt.total_dof)
 

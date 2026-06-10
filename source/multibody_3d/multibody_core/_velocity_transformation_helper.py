@@ -10,9 +10,10 @@ Pure, stateless helpers shared by the symbolic and JAX runtime paths:
     ``RootToLeafPaths``        — lightweight dataclass for traversal paths
 
 **JAX runtime backend** (requires ``jax``; lazy-imported)
-    Rotation helpers, block formulas, kinematics cache builders,
-    recursive assemblers, eager evaluators, and JIT factory functions.
-    See the "JAX Runtime Backend" section below.
+    Rotation / algebra helpers, block formulas (B and Bdot), and recursive
+    assemblers.  The higher-level cache builders (``build_cache_jax``,
+    ``build_rate_cache_jax``) and JIT factories (``make_B_evaluator_mainint``,
+    ``make_Bdot_evaluator_mainint``) live in ``velocity_transformation_3d.py``.
 """
 import numpy as np
 import sympy as sym
@@ -180,26 +181,150 @@ class SymbolicBdotBlock:
 
 @dataclass(frozen=True, slots=True)
 class NumericModelParams:
-    """Constant geometry extracted from ``JointSystem3D`` for the numeric evaluator.
+    """Static runtime specification extracted from ``JointSystem3D``.
 
-    All vectors are stored as ``np.ndarray`` with shape ``(3, 1)``.
+    Stores immutable topology and bookkeeping metadata.  Geometry vectors
+    (``p2j``, ``j2c``, ``u``, ``u1``, ``u2``) are kept as raw
+    ``sym.Matrix | None`` values — exactly as they appear on the joint
+    objects — so that parameterized entries (containing ``body_data_sym``
+    symbols) are preserved rather than frozen to floats.
+
+    For purely-constant systems all geometry vectors are numeric sympy
+    matrices and can be converted to JAX arrays on demand.  For
+    parameterized systems the conversion step must substitute numeric
+    values for the symbolic parameters first (implemented in a later
+    phase).
+
     Built once via :meth:`VelocityTransformation3D.build_numeric_params`;
-    reuse across many :meth:`~VelocityTransformation3D.evaluate_B_jax` calls.
+    reused across many evaluation calls without reconstruction.
     """
     n_bodies:      int
     n_joints:      int
     total_dof:     int
     total_cfg_dof: int
-    parent:        List[int]               # parent body id per joint
-    child:         List[int]               # child body id per joint
-    code:          List[str]               # 1-letter type code per joint
-    p2j:           List[Any]               # parent_cg_to_joint (3,1) np.ndarray
-    j2c:           List[Any]               # joint_to_child_cg (3,1) np.ndarray
-    u:             List[Optional[Any]]     # axis_u (3,1) or None
-    u1:            List[Optional[Any]]     # axis_u1 (3,1) or None
-    u2:            List[Optional[Any]]     # axis_u2 (3,1) or None
-    col_slices:    List[slice]             # speed-DOF slices into B cols
-    cfg_slices:    List[slice]             # cfg-DOF slices into q_int
+    parent:        List[int]                        # parent body id per joint
+    child:         List[int]                        # child body id per joint
+    code:          List[str]                        # 1-letter type code per joint
+    p2j:           List[Any]                        # parent_cg_to_joint: sym.Matrix (3,1)
+    j2c:           List[Any]                        # joint_to_child_cg:  sym.Matrix (3,1)
+    u:             List[Optional[Any]]              # axis_u:  sym.Matrix (3,1) or None
+    u1:            List[Optional[Any]]              # axis_u1: sym.Matrix (3,1) or None
+    u2:            List[Optional[Any]]              # axis_u2: sym.Matrix (3,1) or None
+    col_slices:    List[slice]                      # speed-DOF slices into B cols
+    cfg_slices:    List[slice]                      # cfg-DOF slices into q_int
+    body_paths:    List[List[int]]                  # root-to-leaf body paths
+    joint_paths:   List[List[int]]                  # root-to-leaf joint paths
+
+
+# -- Geometry extractor -------------------------------------------------------
+
+@dataclass(frozen=True)
+class GeometryExtractor:
+    """Evaluates joint geometry vectors given numeric body-parameter values.
+
+    Constant (symbol-free) entries are pre-converted to ``np.ndarray``.
+    Parameterized entries (containing ``body_data_sym`` symbols) are
+    lambdified once at construction and evaluated on each call.
+
+    Attributes
+    ----------
+    _entries : tuple
+        5-tuple ``(p2j, j2c, u, u1, u2)`` of per-joint lists.  Each
+        element is ``np.ndarray(3,1)``, ``None``, or a callable
+        ``f(body_params_np) -> np.ndarray(3,1)``.
+    n_body_params : int
+        Expected length of the body-parameter vector.
+    has_dynamic : bool
+        *True* if any entry depends on ``body_data_sym`` symbols.
+    """
+
+    _entries: tuple
+    n_body_params: int
+    has_dynamic: bool
+
+    def evaluate(self, body_params_np=None):
+        """Return ``(p2j, j2c, u, u1, u2)`` as a tuple of five lists.
+
+        Parameters
+        ----------
+        body_params_np : array_like or None
+            Numeric body-parameter values, shape ``(n_body_params,)``.
+            Required when ``has_dynamic`` is *True*.
+
+        Returns
+        -------
+        tuple of 5 lists
+            Each list has one entry per joint: ``np.ndarray(3,1)`` or ``None``.
+        """
+        if self.has_dynamic:
+            if body_params_np is None:
+                raise ValueError(
+                    "body_params_np is required when geometry has dynamic parameters."
+                )
+            bp = np.asarray(body_params_np, dtype=float).ravel()
+            if bp.shape[0] != self.n_body_params:
+                raise ValueError(
+                    f"body_params length mismatch: expected {self.n_body_params}, "
+                    f"got {bp.shape[0]}."
+                )
+        else:
+            bp = None
+        return tuple(
+            [e(bp) if callable(e) else e for e in field_list]
+            for field_list in self._entries
+        )
+
+
+def build_geometry_extractor(params, body_sym_list):
+    """Build a :class:`GeometryExtractor` from the symbolic geometry in *params*.
+
+    Parameters
+    ----------
+    params : NumericModelParams
+        Static runtime spec whose ``p2j``, ``j2c``, ``u``, ``u1``, ``u2``
+        entries are ``sym.Matrix(3,1)`` or ``None``.
+    body_sym_list : list[sym.Symbol]
+        Ordered body-data symbols matching the body_params slice of
+        ``mainNumVars_int``.
+
+    Returns
+    -------
+    GeometryExtractor
+    """
+    body_sym_set = frozenset(body_sym_list)
+    has_dynamic = False
+
+    def _prepare(v):
+        nonlocal has_dynamic
+        if v is None:
+            return None
+        free = v.free_symbols
+        if not free:
+            return np.array(v.tolist(), dtype=float).reshape(3, 1)
+        unknown = free - body_sym_set
+        if unknown:
+            raise ValueError(
+                f"Geometry vector contains symbols not in body_data_sym: {unknown}"
+            )
+        has_dynamic = True
+        # TODO: this is very suspicious - why are we lambdifying here?
+        fn = sym.lambdify(body_sym_list, v, modules='numpy')
+
+        def _eval(bp, _fn=fn):
+            return np.array(_fn(*bp), dtype=float).reshape(3, 1)
+
+        return _eval
+
+    entries = tuple(
+        [_prepare(v) for v in getattr(params, name)]
+        for name in ('p2j', 'j2c', 'u', 'u1', 'u2')
+    )
+
+    return GeometryExtractor(
+        _entries=entries,
+        n_body_params=len(body_sym_list),
+        has_dynamic=has_dynamic,
+    )
 
 
 # ===========================================================================
@@ -207,33 +332,6 @@ class NumericModelParams:
 # ===========================================================================
 # Pure functions moved from VelocityTransformation3D.  These have no
 # dependency on ``self`` and operate only on symbolic quantities.
-
-def _basis_time_derivative(
-    omega_parent: sym.Matrix,
-    U_joint: sym.Matrix,
-) -> sym.Matrix:
-    """Time derivative of a joint basis in the global frame.
-
-    For every joint type the formula is the same::
-
-        dU/dt = skew(omega_parent) \u00b7 U_joint
-
-    This unifies the former ``_udot_spherical`` and ``_udot_floating``
-    static methods, which both reduced to this expression.
-
-    Parameters
-    ----------
-    omega_parent : sym.Matrix (3, 1)
-        Absolute angular velocity of the parent body.
-    U_joint : sym.Matrix (3, m)
-        Joint axis / basis matrix.
-
-    Returns
-    -------
-    sym.Matrix (3, m)
-    """
-    return skew(omega_parent) * U_joint
-
 
 def _get_block_kinematics(cache, k: int, j: int) -> "BlockKinematics3D":
     """Extract position-level kinematic quantities for block (k, j).
@@ -531,205 +629,6 @@ def _update_Bdot_block_jax(code, prev_block, delta, delta_dot, U_j, U_dot_j):
     raise ValueError(f"Unsupported joint code {code!r}.")
 
 
-# ==================== Cache Builders =========================================
-
-def build_cache_jax(
-    q_int,
-    *,
-    n_bodies,
-    n_joints,
-    parent,
-    child,
-    codes,
-    cfg_slices,
-    p2j,
-    j2c,
-    u,
-    u1,
-    u2,
-):
-    """Build position-level kinematics cache (pure JAX).
-
-    Returns ``(A_abs, r_abs, rJ, U, R1_cache)`` where ``R1_cache[j]`` stores
-    the first-axis rotation for universal joints (needed by rate cache) and
-    *None* for other types.
-    """
-    q = q_int.ravel()
-    NB, NJ = n_bodies, n_joints
-    I3 = jnp.eye(3)
-    z3 = jnp.zeros((3, 1))
-
-    A_abs = [None] * (NB + 1)
-    r_abs = [None] * (NB + 1)
-    A_abs[0] = I3
-    r_abs[0] = z3
-
-    rJ = [None] * NJ
-    U  = [None] * NJ
-    R1_cache = [None] * NJ  # stored for universal joints
-
-    for j in range(NJ):
-        p_id   = parent[j]
-        c_id   = child[j]
-        code   = codes[j]
-        A_p    = A_abs[p_id]
-        r_p    = r_abs[p_id]
-        sl     = cfg_slices[j]
-
-        # ---- relative rotation ----
-        if code == "R":
-            Arel_j = _axis_angle_rotation_jax(u[j], q[sl.start])
-        elif code == "P":
-            Arel_j = I3
-        elif code == "U":
-            R1 = _axis_angle_rotation_jax(u1[j], q[sl.start])
-            R2 = _axis_angle_rotation_jax(u2[j], q[sl.start + 1])
-            Arel_j = R1 @ R2
-            R1_cache[j] = R1
-        elif code == "C":
-            Arel_j = _axis_angle_rotation_jax(u[j], q[sl.start])
-        elif code == "S":
-            Arel_j = _quaternion_to_rotation_jax(q[sl.start], q[sl.start + 1:sl.start + 4])
-        elif code == "F":
-            Arel_j = _quaternion_to_rotation_jax(q[sl.start + 3], q[sl.start + 4:sl.start + 7])
-        else:
-            raise ValueError(f"Unsupported joint code {code!r}.")
-
-        # ---- absolute rotation ----
-        A_abs[c_id] = A_p @ Arel_j
-
-        # ---- joint position ----
-        rJ[j] = r_p + A_p @ p2j[j]
-
-        # ---- prismatic / cylindrical / floating translation ----
-        if code == "P":
-            trans = A_p @ (u[j] * q[sl.start])
-        elif code == "C":
-            trans = A_p @ (u[j] * q[sl.start + 1])
-        elif code == "F":
-            rJ[j] = A_p @ q[sl.start:sl.start + 3].reshape(3, 1)
-            trans = z3  # already incorporated into rJ for F-joint
-        else:
-            trans = z3
-
-        # ---- child CG position ----
-        r_abs[c_id] = rJ[j] + A_abs[c_id] @ j2c[j] + trans
-
-        # ---- global axes / basis ----
-        if code in ("R", "P", "C"):
-            U[j] = A_p @ u[j]                                         # (3,1)
-        elif code == "U":
-            U[j] = jnp.hstack([A_p @ u1[j], A_p @ R1 @ u2[j]])       # (3,2)
-        elif code == "S":
-            U[j] = A_p                                                 # (3,3)
-        elif code == "F":
-            U[j] = jnp.hstack([A_p, A_p])                             # (3,6)
-
-    return A_abs, r_abs, rJ, U, R1_cache
-
-
-def build_rate_cache_jax(
-    q_int,
-    qd,
-    *,
-    A_abs,
-    r_abs,
-    rJ,
-    U,
-    n_bodies,
-    n_joints,
-    parent,
-    child,
-    codes,
-    col_slices,
-):
-    """Build first-order rate kinematics cache (pure JAX).
-
-    Returns ``(omega_abs, v_abs, vJ, Udot)``.
-    """
-    qd_arr = qd.ravel()
-    NB, NJ = n_bodies, n_joints
-    z3 = jnp.zeros((3, 1))
-
-    omega_abs = [None] * (NB + 1)
-    v_abs     = [None] * (NB + 1)
-    omega_abs[0] = z3
-    v_abs[0]     = z3
-
-    vJ   = [None] * NJ
-    Udot = [None] * NJ
-
-    for j in range(NJ):
-        p_id    = parent[j]
-        c_id    = child[j]
-        code    = codes[j]
-        col     = col_slices[j]
-        omega_p = omega_abs[p_id]
-        v_p     = v_abs[p_id]
-
-        # ---- joint-point velocity ----
-        vJ[j] = v_p + _skew_jax(omega_p) @ (rJ[j] - r_abs[p_id])
-
-        if code == "R":
-            U_j    = U[j]
-            qd_j   = qd_arr[col.start]
-            omega_c = omega_p + U_j * qd_j
-            v_c     = vJ[j] + _skew_jax(omega_c) @ (r_abs[c_id] - rJ[j])
-            Udot[j] = _skew_jax(omega_p) @ U_j
-
-        elif code == "P":
-            U_j    = U[j]
-            qd_j   = qd_arr[col.start]
-            omega_c = omega_p
-            v_c     = vJ[j] + U_j * qd_j + _skew_jax(omega_c) @ (r_abs[c_id] - rJ[j])
-            Udot[j] = _skew_jax(omega_p) @ U_j
-
-        elif code == "U":
-            U2     = U[j]
-            u1_g   = U2[:, 0:1]
-            u2_g   = U2[:, 1:2]
-            qd1    = qd_arr[col.start]
-            qd2    = qd_arr[col.start + 1]
-            u1_dot = _skew_jax(omega_p) @ u1_g
-            omega_after_u1 = omega_p + qd1 * u1_g
-            u2_dot = _skew_jax(omega_after_u1) @ u2_g
-            Udot[j] = jnp.hstack([u1_dot, u2_dot])
-            omega_c = omega_p + qd1 * u1_g + qd2 * u2_g
-            v_c     = vJ[j] + _skew_jax(omega_c) @ (r_abs[c_id] - rJ[j])
-
-        elif code == "C":
-            U_j     = U[j]
-            qd_rot  = qd_arr[col.start]
-            qd_tr   = qd_arr[col.start + 1]
-            omega_c = omega_p + U_j * qd_rot
-            v_c     = vJ[j] + U_j * qd_tr + _skew_jax(omega_c) @ (r_abs[c_id] - rJ[j])
-            Udot[j] = _skew_jax(omega_p) @ U_j
-
-        elif code == "S":
-            U_j_s  = U[j]
-            qd_s   = qd_arr[col.start:col.start + 3].reshape(3, 1)
-            omega_c = omega_p + U_j_s @ qd_s
-            v_c     = vJ[j] + _skew_jax(omega_c) @ (r_abs[c_id] - rJ[j])
-            Udot[j] = _skew_jax(omega_p) @ U_j_s
-
-        elif code == "F":
-            A_p_j  = A_abs[p_id]
-            qd_t   = qd_arr[col.start:col.start + 3].reshape(3, 1)
-            qd_r   = qd_arr[col.start + 3:col.start + 6].reshape(3, 1)
-            omega_c = omega_p + A_p_j @ qd_r
-            vJ[j]   = A_p_j @ qd_t  # Overwrite vJ for F-joint to make the joint be coincident with the child CG
-            v_c     = vJ[j]
-            Udot[j] = _skew_jax(omega_p) @ U[j]
-
-        else:
-            raise ValueError(f"Unsupported joint code {code!r}.")
-
-        omega_abs[c_id] = omega_c
-        v_abs[c_id]     = v_c
-
-    return omega_abs, v_abs, vJ, Udot
-
-
 # ==================== Recursive Assembly =====================================
 
 def _assemble_B_recursive_jax(
@@ -839,170 +738,3 @@ def _assemble_Bdot_recursive_jax(
                 prev_block    = block
 
     return Bdot
-
-
-# ==================== High-Level Evaluators ==================================
-
-def evaluate_B_jax(
-    q_int,
-    *,
-    n_bodies,
-    n_joints,
-    total_dof,
-    parent,
-    child,
-    codes,
-    cfg_slices,
-    col_slices,
-    p2j,
-    j2c,
-    u,
-    u1,
-    u2,
-    body_paths,
-    joint_paths,
-):
-    """Evaluate the velocity-transformation matrix B using JAX."""
-    A_abs, r_abs, rJ, U, _ = build_cache_jax(
-        q_int,
-        n_bodies=n_bodies, n_joints=n_joints,
-        parent=parent, child=child, codes=codes,
-        cfg_slices=cfg_slices, p2j=p2j, j2c=j2c,
-        u=u, u1=u1, u2=u2,
-    )
-    return _assemble_B_recursive_jax(
-        r_abs, rJ, U,
-        n_bodies=n_bodies, total_dof=total_dof,
-        codes=codes, body_paths=body_paths,
-        joint_paths=joint_paths, col_slices=col_slices,
-    )
-
-
-def evaluate_Bdot_jax(
-    q_int,
-    qd,
-    *,
-    n_bodies,
-    n_joints,
-    total_dof,
-    parent,
-    child,
-    codes,
-    cfg_slices,
-    col_slices,
-    p2j,
-    j2c,
-    u,
-    u1,
-    u2,
-    body_paths,
-    joint_paths,
-):
-    """Evaluate the time-derivative Bdot using JAX."""
-    A_abs, r_abs, rJ, U, _ = build_cache_jax(
-        q_int,
-        n_bodies=n_bodies, n_joints=n_joints,
-        parent=parent, child=child, codes=codes,
-        cfg_slices=cfg_slices, p2j=p2j, j2c=j2c,
-        u=u, u1=u1, u2=u2,
-    )
-    omega_abs, v_abs, vJ, Udot = build_rate_cache_jax(
-        q_int, qd,
-        A_abs=A_abs, r_abs=r_abs, rJ=rJ, U=U,
-        n_bodies=n_bodies, n_joints=n_joints,
-        parent=parent, child=child, codes=codes,
-        col_slices=col_slices,
-    )
-    return _assemble_Bdot_recursive_jax(
-        r_abs, rJ, U, v_abs, vJ, Udot,
-        n_bodies=n_bodies, total_dof=total_dof,
-        codes=codes, body_paths=body_paths,
-        joint_paths=joint_paths, col_slices=col_slices,
-    )
-
-
-# ==================== Geometry Conversion ====================================
-
-def _convert_geometry_to_jax(params):
-    """Convert ``NumericModelParams`` geometry arrays to JAX arrays.
-
-    Returns a dict of keyword arguments suitable for
-    ``build_cache_jax`` / ``evaluate_B_jax`` etc.
-    """
-    z31 = jnp.zeros((3, 1))
-
-    def _to_jax(v):
-        return jnp.asarray(v) if v is not None else z31
-
-    return dict(
-        n_bodies=params.n_bodies,
-        n_joints=params.n_joints,
-        total_dof=params.total_dof,
-        parent=params.parent,
-        child=params.child,
-        codes=params.code,
-        cfg_slices=params.cfg_slices,
-        col_slices=params.col_slices,
-        p2j=[jnp.asarray(v) for v in params.p2j],
-        j2c=[jnp.asarray(v) for v in params.j2c],
-        u=[_to_jax(v) for v in params.u],
-        u1=[_to_jax(v) for v in params.u1],
-        u2=[_to_jax(v) for v in params.u2],
-    )
-
-
-# ==================== JIT-compiled Factory Functions =========================
-
-def make_B_evaluator(params, body_paths, joint_paths):
-    """Return a ``jax.jit``-compiled function ``f(q_int) -> B``.
-
-    Parameters
-    ----------
-    params : NumericModelParams
-        Constant geometry (built once via
-        ``VelocityTransformation3D.build_numeric_params``).
-    body_paths, joint_paths : list[list[int]]
-        Root-to-leaf traversal schedule.
-
-    Returns
-    -------
-    callable
-        ``f(q_int: jnp.ndarray) -> jnp.ndarray`` of shape
-        ``(6*n_bodies, total_dof)``.
-    """
-    kw = _convert_geometry_to_jax(params)
-    kw["body_paths"] = body_paths
-    kw["joint_paths"] = joint_paths
-
-    @jax.jit
-    def _evaluate(q_int):
-        return evaluate_B_jax(jnp.asarray(q_int), **kw)
-
-    return _evaluate
-
-
-def make_Bdot_evaluator(params, body_paths, joint_paths):
-    """Return a ``jax.jit``-compiled function ``f(q_int, qd) -> Bdot``.
-
-    Parameters
-    ----------
-    params : NumericModelParams
-        Constant geometry.
-    body_paths, joint_paths : list[list[int]]
-        Root-to-leaf traversal schedule.
-
-    Returns
-    -------
-    callable
-        ``f(q_int: jnp.ndarray, qd: jnp.ndarray) -> jnp.ndarray`` of shape
-        ``(6*n_bodies, total_dof)``.
-    """
-    kw = _convert_geometry_to_jax(params)
-    kw["body_paths"] = body_paths
-    kw["joint_paths"] = joint_paths
-
-    @jax.jit
-    def _evaluate(q_int, qd):
-        return evaluate_Bdot_jax(jnp.asarray(q_int), jnp.asarray(qd), **kw)
-
-    return _evaluate

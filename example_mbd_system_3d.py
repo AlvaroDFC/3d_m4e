@@ -18,8 +18,8 @@ When to use which API layer
 ---------------------------
   mbd.vt.*                — power-user / block-level inspection (symbolic layers)
   mbd.assemble_B_symbolic()  — symbolic B/Bdot for analysis (auto-supplies q symbols)
-  mbd.evaluate_B_jax()    — internal-coordinate runtime (q_int already known)
-  mbd.evaluate_B_from_user_q()  — user-coordinate runtime (Euler/quat q_user as input)
+  mbd.evaluate_B()        — user-coordinate runtime (mainNumVars as input)
+  mbd.B_func()            — internal-coordinate JIT evaluator (mainNumVars_int)
 """
 
 import numpy as np
@@ -88,42 +88,40 @@ def run():
     qd    = np.array([0.1, 0.0, 0.5, 0.0, 0.2, 0.0, 1.0, -0.5])
 
     # ── [5] Evaluate from internal coordinates ────────────────────────────────
-    # Use these when q_int is already available (e.g. during integration).
-    B    = mbd.evaluate_B_jax(q_int, params=params)
-    Bdot = mbd.evaluate_Bdot_jax(q_int, qd, params=params)
+    # Use B_func / Bdot_func directly when q_int is already available.
+    mainNumVars_int = np.concatenate([q_int, qd])
+    B    = mbd.B_func(mainNumVars_int)
+    Bdot = mbd.Bdot_func(mainNumVars_int)
     print(f"B    shape (from q_int): {B.shape}")    # (18, 8)
     print(f"Bdot shape (from q_int): {Bdot.shape}") # (18, 8)
 
     # ── [6] Evaluate from user-facing coordinates ─────────────────────────────
-    # Use these when the user specifies initial conditions (Euler angles, etc.).
+    # Use mbd.evaluate_B / evaluate_Bdot when the user specifies initial
+    # conditions in user-facing format (Euler angles, etc.).
     # q_user has the same layout as q_int when rot_param='quat' for F.
     q_user = q_int.copy()   # identical here; would differ for rot_param='euler'
 
-    B_user    = mbd.evaluate_B_from_user_q(q_user)
-    Bdot_user = mbd.evaluate_Bdot_from_user_state(q_user, qd)
+    mainNumVars = np.concatenate([q_user, qd])
+    B_user    = mbd.evaluate_B(mainNumVars)
+    Bdot_user = mbd.evaluate_Bdot(mainNumVars)
     print(f"B    shape (from q_user): {B_user.shape}")
     print(f"Bdot shape (from q_user): {Bdot_user.shape}")
 
     # ── [7] JIT-compiled evaluators for repeated calls ────────────────────────
     # Build once (triggers XLA compilation on first call), then reuse cheaply.
-    B_fn    = mbd.build_B_evaluator_jax(params=params)
-    Bdot_fn = mbd.build_Bdot_evaluator_jax(params=params)
+    # These are at the VT level and accept mainNumVars_int = [q_int, qd].
+    B_fn    = mbd.vt.build_B_evaluator_jax(params=params)
+    Bdot_fn = mbd.vt.build_Bdot_evaluator_jax(params=params)
 
     # Warm-up (compiles the XLA kernel)
-    _ = B_fn(q_int)
-    _ = Bdot_fn(q_int, qd)
+    _ = B_fn(mainNumVars_int)
+    _ = Bdot_fn(mainNumVars_int)
 
     # Fast repeated evaluation
-    B_jit    = B_fn(q_int)
-    Bdot_jit = Bdot_fn(q_int, qd)
+    B_jit    = B_fn(mainNumVars_int)
+    Bdot_jit = Bdot_fn(mainNumVars_int)
     print(f"B_jit    shape: {B_jit.shape}")
     print(f"Bdot_jit shape: {Bdot_jit.shape}")
-
-    # User-coordinate JIT variants
-    B_user_fn    = mbd.build_B_evaluator_from_user_q(params=params)
-    Bdot_user_fn = mbd.build_Bdot_evaluator_from_user_state(params=params)
-    print(f"B_user_jit    shape: {B_user_fn(q_user).shape}")
-    print(f"Bdot_user_jit shape: {Bdot_user_fn(q_user, qd).shape}")
 
     # ── [8] Verify results agree ──────────────────────────────────────────────
     np.testing.assert_allclose(B, B_jit,       atol=1e-12)
