@@ -3,7 +3,7 @@ from multibody_3d import MbdSystem3D
 import example7 as ex
 import numpy as np
 from time import time
-
+np.set_printoptions(linewidth = 200, precision = 3)
 import jax
 print(jax.devices())
 
@@ -128,3 +128,51 @@ print(np.array(forces.total))
 
 print("\nForces – spring potential energy:")
 print(float(forces.spring_potential_energy))
+
+####### Mass matrix / EOM kernel #############################################
+# Mass and body-frame inertia for each of the 4 bodies (example7: F + 3R).
+m_vals = np.array([1.0, 0.5, 0.5, 0.5])      # mass [kg] per body
+J_vals = np.array([
+    [0.01, 0.01, 0.01],   # body 1 (floating base)
+    [0.01, 0.01, 0.01],   # body 2 (link 1)
+    [0.01, 0.01, 0.01],   # body 3 (link 2)
+    [0.01, 0.01, 0.01],   # body 4 (link 3)
+])
+
+# Rebuild mbd with body_inertia to activate mass_func / eom_func.
+body_inertia = {
+    b: {'mass': float(m_vals[b-1]), 'J': np.diag(J_vals[b-1])}
+    for b in range(1, mbd.NBodies + 1)
+}
+mbd = MbdSystem3D(
+    data=ex.data,
+    body_data_sym=getattr(ex, 'body_data_sym', {}),
+    force_points_sym={**getattr(ex, 'force_points_sym', {}),
+                      **getattr(ex, 'force_sym',        {})},
+    points_sym=getattr(ex, 'points_sym', {}),
+    Initial_Points=getattr(ex, 'Initial_Points', {}),
+    Force=getattr(ex, 'Force', {}),
+    body_inertia=body_inertia,
+)
+
+# Warm up (triggers JIT compilation for eom_func)
+_ = mbd.evaluate_eom_kernel(mainNumVars)
+
+t0 = time()
+for _ in range(n):
+    eom = mbd.evaluate_eom_kernel(mainNumVars)
+print(f"EOM kernel:   {(time()-t0)/n*1e6:.2f} µs/call  (B + Bdot + M_body + M)")
+
+t0 = time()
+for _ in range(n):
+    mr = mbd.evaluate_mass_matrix(mainNumVars)
+print(f"Mass matrix:  {(time()-t0)/n*1e6:.2f} µs/call  (M only)")
+
+print("\nGeneralised (reduced) mass matrix  M = B^T M_body B:")
+M_np = np.array(eom.M)
+print(M_np)
+
+eigvals = np.linalg.eigvalsh(M_np.astype(float))
+print(f"\nEigenvalues (all > 0 = positive definite): {eigvals}")
+print(f"Symmetry error max|M - M^T|: {np.max(np.abs(M_np - M_np.T)):.2e}")
+

@@ -6,7 +6,7 @@ Owns ``JointSystem3D``, ``CoordBundle``, ``VelocityTransformation3D``,
 the symbolic / numeric points cache, and (when declared) the full force
 layer: parsed definitions, symbolic wrenches, and persistent JAX evaluators.
 
-Not included: mass/inertia, EOM assembly, numerical integration.
+Not included: EOM assembly, numerical integration.
 """
 
 from __future__ import annotations
@@ -55,6 +55,16 @@ from .forces_runtime_3d import (
     ForcesEvalResult,
     make_forces_evaluator_mainint,
     )
+from .mass_symbolic_3d import (
+    SymbolicMassCache3D,
+    build_mass_symbolic,
+)
+from .mass_runtime_3d import (
+    MassEvalResult,
+    make_mass_evaluator_mainint,
+    EomKernelResult,
+    make_eom_evaluator_mainint,
+)
 
 
 @dataclass
@@ -125,6 +135,17 @@ class MbdSystem3D:
     #: components in ``Initial_Points`` entries.  User-declared order is
     #: preserved and propagated into ``mainSymVars`` / ``mainSymVars_int``.
     points_sym: dict       = field(default_factory=dict)
+    #: Per-body mass and body-frame inertia tensor.
+    #: Keys are 1-based body ids; values are dicts with:
+    #:
+    #:   ``"mass"`` — scalar (float or sym.Expr).
+    #:
+    #:   ``"J"``    — (3, 3) array-like or sym.Matrix expressed in the
+    #:                body's own reference frame.
+    #:
+    #: When non-empty, :attr:`sym_mass` and :attr:`mass_func` are built
+    #: automatically during ``__post_init__``.
+    body_inertia: dict     = field(default_factory=dict)
     #: Point-definition dictionary with two sub-keys:
     #:
     #: ``"GR"`` — list of world-frame 3-D points ``[x, y, z]`` (numeric or
@@ -177,6 +198,24 @@ class MbdSystem3D:
     forces_func: Optional[Callable] = field(
         init=False, repr=False, default=None,
     )
+    #: Symbolic mass / inertia cache (one :class:`~mass_symbolic_3d.BodyInertiaRecord`
+    #: per body).  Built when :attr:`body_inertia` is non-empty; ``None`` otherwise.
+    sym_mass: Optional[SymbolicMassCache3D] = field(
+        init=False, repr=False, default=None,
+    )
+    #: JIT-compiled mass-matrix callable
+    #: ``f(mainNumVars_int) -> MassEvalResult``.
+    #: Built when :attr:`body_inertia` is non-empty; ``None`` otherwise.
+    mass_func: Optional[Callable] = field(
+        init=False, repr=False, default=None,
+    )
+    #: JIT-compiled combined EOM kernel callable
+    #: ``f(mainNumVars_int) -> EomKernelResult``.
+    #: Returns B, Bdot, M_body, M in a single kinematics pass.
+    #: Built when :attr:`body_inertia` is non-empty; ``None`` otherwise.
+    eom_func: Optional[Callable] = field(
+        init=False, repr=False, default=None,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.data, dict):
@@ -212,9 +251,10 @@ class MbdSystem3D:
             self.sym_points = build_points_symbolic(
                 self.Initial_Points, _pos_cache, self.NBodies,
             )
-        elif self.forces_def is not None:
-            # No Initial_Points, but Force is declared: build pos_cache
-            # for torsion axes; sym_points gets only CG records.
+        elif self.forces_def is not None or self.body_inertia:
+            # No Initial_Points, but Force or body_inertia is declared:
+            # build pos_cache for torsion axes / world-frame inertia;
+            # sym_points gets only CG records.
             _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
             self.sym_points = build_points_symbolic({}, _pos_cache, self.NBodies)
         else:
@@ -277,6 +317,32 @@ class MbdSystem3D:
                 self._slc_body_int,
                 self._slc_force_int,
                 self._slc_points_int,
+                self._geom_extractor,
+                self.NBodies,
+                body_sym_list=list(self.body_data_sym.values()),
+            )
+        # Build symbolic mass cache and JAX mass evaluator if body_inertia
+        # was declared.
+        if self.body_inertia and _pos_cache is not None:
+            self.sym_mass = build_mass_symbolic(
+                self.body_inertia, _pos_cache, self.NBodies,
+            )
+            self.mass_func = make_mass_evaluator_mainint(
+                self.body_inertia,
+                self._numeric_params,
+                self._slc_q_int,
+                self._slc_qd_int,
+                self._slc_body_int,
+                self._geom_extractor,
+                self.NBodies,
+                body_sym_list=list(self.body_data_sym.values()),
+            )
+            self.eom_func = make_eom_evaluator_mainint(
+                self.body_inertia,
+                self._numeric_params,
+                self._slc_q_int,
+                self._slc_qd_int,
+                self._slc_body_int,
                 self._geom_extractor,
                 self.NBodies,
                 body_sym_list=list(self.body_data_sym.values()),
@@ -531,6 +597,7 @@ class MbdSystem3D:
             points_sym=getattr(ex, "points_sym", {}),
             Initial_Points=getattr(ex, "Initial_Points", {}),
             Force=getattr(ex, "Force", {}),
+            body_inertia=getattr(ex, "body_inertia", {}),
         )
 
     # ── Topology / sizing properties ─────────────────────────────────────────
@@ -830,6 +897,102 @@ class MbdSystem3D:
         arr = self._validate_mainNumVars_shape(mainNumVars)
         return self.forces_func(self._build_mainNumVars_int(arr))
 
+    def evaluate_mass_matrix(self, mainNumVars) -> "MassEvalResult":
+        """Evaluate the generalised mass matrix M = B^T M_body B.
+
+        Parameters
+        ----------
+        mainNumVars : array_like, shape ``(len(mainSymVars),)``
+            User-facing variable vector
+            ``[q_user, qd, body_params, force_params, point_params]``.
+
+        Returns
+        -------
+        MassEvalResult
+            Named tuple with one field:
+
+            * ``M`` — ``jnp.ndarray`` of shape ``(total_dof, total_dof)``,
+              the symmetric positive-definite generalised mass matrix.
+
+        Raises
+        ------
+        RuntimeError
+            If no ``body_inertia`` dictionary was declared (``mass_func`` is
+            None).
+        """
+        if self.mass_func is None:
+            raise RuntimeError(
+                "evaluate_mass_matrix() requires body_inertia to be declared. "
+                "mass_func is None."
+            )
+        arr = self._validate_mainNumVars_shape(mainNumVars)
+        return self.mass_func(self._build_mainNumVars_int(arr))
+
+    def evaluate_eom_kernel(self, mainNumVars) -> "EomKernelResult":
+        """Evaluate B, Bdot, M_body, and M in a single kinematics pass.
+
+        Preferred over calling :meth:`evaluate_B`, :meth:`evaluate_Bdot`,
+        and :meth:`evaluate_mass_matrix` separately in integrator loops,
+        since all four quantities share one ``build_cache_jax`` call.
+
+        Parameters
+        ----------
+        mainNumVars : array_like, shape ``(len(mainSymVars),)``
+
+        Returns
+        -------
+        EomKernelResult
+            Named tuple with fields ``B``, ``Bdot``, ``M_body``, ``M``.
+
+        Raises
+        ------
+        RuntimeError
+            If no ``body_inertia`` was declared (``eom_func`` is None).
+        """
+        if self.eom_func is None:
+            raise RuntimeError(
+                "evaluate_eom_kernel() requires body_inertia to be declared. "
+                "eom_func is None."
+            )
+        arr = self._validate_mainNumVars_shape(mainNumVars)
+        return self.eom_func(self._build_mainNumVars_int(arr))
+
+    def evaluate_generalized_forces(self, mainNumVars):
+        """Evaluate the generalised force vector Q_gen = B^T f_wrench.
+
+        Combines :meth:`evaluate_B` and :meth:`evaluate_total_wrench`
+        into the generalised force vector used on the right-hand side of
+        the equations of motion::
+
+            M(q) q̈ = Q_gen(q, q̇)
+
+        Parameters
+        ----------
+        mainNumVars : array_like, shape ``(len(mainSymVars),)``
+            User-facing variable vector
+            ``[q_user, qd, body_params, force_params, point_params]``.
+
+        Returns
+        -------
+        jnp.ndarray, shape ``(total_dof,)``
+            Generalised force vector.
+
+        Raises
+        ------
+        RuntimeError
+            If no ``Force`` dictionary was declared (``forces_func`` is None).
+        """
+        if self.forces_func is None:
+            raise RuntimeError(
+                "evaluate_generalized_forces() requires a Force dictionary to "
+                "be declared.  forces_func is None."
+            )
+        arr     = self._validate_mainNumVars_shape(mainNumVars)
+        mnv_int = self._build_mainNumVars_int(arr)
+        B       = self.B_func(mnv_int)              # (6*NBodies, total_dof)
+        f_total = self.forces_func(mnv_int).total   # (NBodies, 6)
+        return B.T @ f_total.ravel()                # (total_dof,)
+
     def evaluate_total_wrench(self, mainNumVars):
         """Evaluate the total (summed) per-body wrench array.
 
@@ -890,8 +1053,12 @@ class MbdSystem3D:
             f", forces={len(self.forces_def.cg_forces + self.forces_def.point_forces + self.forces_def.tension_springs + self.forces_def.tension_dampers + self.forces_def.torsion_springs + self.forces_def.torsion_dampers)}el"
             if self.forces_def is not None else ""
         )
+        mass_info = (
+            f", mass=True"
+            if self.mass_func is not None else ""
+        )
         return (
             f"MbdSystem3D(NBodies={self.NBodies}, NJoints={self.NJoints}, "
             f"total_dof={self.total_dof}, total_cfg_dof={self.total_cfg_dof}, "
-            f"total_user_dof={self.total_user_dof}{force_info})"
+            f"total_user_dof={self.total_user_dof}{force_info}{mass_info})"
         )
