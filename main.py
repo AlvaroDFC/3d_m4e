@@ -3,7 +3,7 @@ from multibody_3d import MbdSystem3D
 import example7 as ex
 import numpy as np
 from time import time
-np.set_printoptions(linewidth = 200, precision = 3)
+
 import jax
 print(jax.devices())
 
@@ -92,56 +92,58 @@ blk = blocks[(1, 0)]
 
 ####### Points evaluator ######################################################
 # Warm-up
-_ = mbd.evaluate_points(mainNumVars)
+# _ = mbd.evaluate_points(mainNumVars)
 
-t0 = time()
-for _ in range(n):
-    pts = mbd.evaluate_points(mainNumVars)
-print(f"Points eval:  {(time()-t0)/n*1e6:.2f} µs/call")
+# t0 = time()
+# for _ in range(n):
+#     pts = mbd.evaluate_points(mainNumVars)
+# print(f"Points eval:  {(time()-t0)/n*1e6:.2f} µs/call")
 
-print("\nPoints – r_abs_cg (CG positions, world frame):")
-print(np.array(pts.r_abs_cg))
+# print("\nPoints – r_abs_cg (CG positions, world frame):")
+# print(np.array(pts.r_abs_cg))
 
-print("\nPoints – r_abs_body (body-attached points, world frame):")
-print(np.array(pts.r_abs_body))
+# print("\nPoints – r_abs_body (body-attached points, world frame):")
+# print(np.array(pts.r_abs_body))
 
-print("\nPoints – rho_abs_body (CG-relative moment arms, world frame):")
-print(np.array(pts.rho_abs_body))
+# print("\nPoints – rho_abs_body (CG-relative moment arms, world frame):")
+# print(np.array(pts.rho_abs_body))
 
-print("\nPoints – r_abs_gr (ground reference points, world frame):")
-print(np.array(pts.r_abs_gr))
+# print("\nPoints – r_abs_gr (ground reference points, world frame):")
+# print(np.array(pts.r_abs_gr))
 
 ####### Forces evaluator ######################################################
 # Warm-up
-_ = mbd.evaluate_forces(mainNumVars)
+# _ = mbd.evaluate_forces(mainNumVars)
 
-t0 = time()
-for _ in range(n):
-    forces = mbd.evaluate_forces(mainNumVars)
-print(f"Forces eval:  {(time()-t0)/n*1e6:.2f} µs/call")
+# t0 = time()
+# for _ in range(n):
+#     forces = mbd.evaluate_forces(mainNumVars)
+# print(f"Forces eval:  {(time()-t0)/n*1e6:.2f} µs/call")
 
-print("\nForces – CG wrenches (NBodies × 6) [Fx,Fy,Fz,Mx,My,Mz]:")
-print(np.array(forces.cg))
+# print("\nForces – CG wrenches (NBodies × 6) [Fx,Fy,Fz,Mx,My,Mz]:")
+# print(np.array(forces.cg))
 
-print("\nForces – total wrench (NBodies × 6):")
-print(np.array(forces.total))
+# print("\nForces – total wrench (NBodies × 6):")
+# print(np.array(forces.total))
 
-print("\nForces – spring potential energy:")
-print(float(forces.spring_potential_energy))
+# print("\nForces – spring potential energy:")
+# print(float(forces.spring_potential_energy))
 
-####### Mass matrix / EOM kernel #############################################
+####### Integration ######################################################
 # Mass and body-frame inertia for each of the 4 bodies (example7: F + 3R).
+# Adjust these values to match the actual mass properties of your system.
 m_vals = np.array([1.0, 0.5, 0.5, 0.5])      # mass [kg] per body
-J_vals = np.array([
+# Inertia tensors in body principal frame, shape (NBodies, 3) → diagonal
+J_vals = 100*np.array([
     [0.01, 0.01, 0.01],   # body 1 (floating base)
     [0.01, 0.01, 0.01],   # body 2 (link 1)
     [0.01, 0.01, 0.01],   # body 3 (link 2)
     [0.01, 0.01, 0.01],   # body 4 (link 3)
 ])
 
-# Rebuild mbd with body_inertia to activate mass_func / eom_func.
+# Rebuild mbd with body_inertia so that eom_func / mass_func are available.
 body_inertia = {
-    b: {'mass': float(m_vals[b-1]), 'J': np.diag(J_vals[b-1])}
+    b: {'mass': float(m_vals[b - 1]), 'J': np.diag(J_vals[b - 1])}
     for b in range(1, mbd.NBodies + 1)
 }
 mbd = MbdSystem3D(
@@ -155,24 +157,20 @@ mbd = MbdSystem3D(
     body_inertia=body_inertia,
 )
 
-# Warm up (triggers JIT compilation for eom_func)
-_ = mbd.evaluate_eom_kernel(mainNumVars)
+import diffrax as _diffrax
+sol = mbd.integrate(
+    mainNumVars,
+    tspan=(0.0, 100.0),
+    dt=0.01,
+    rtol=1e-6,
+    atol=1e-6,
+    algorithm="Dopri5",
+    max_steps=500_000,
+)
 
-t0 = time()
-for _ in range(n):
-    eom = mbd.evaluate_eom_kernel(mainNumVars)
-print(f"EOM kernel:   {(time()-t0)/n*1e6:.2f} µs/call  (B + Bdot + M_body + M)")
-
-t0 = time()
-for _ in range(n):
-    mr = mbd.evaluate_mass_matrix(mainNumVars)
-print(f"Mass matrix:  {(time()-t0)/n*1e6:.2f} µs/call  (M only)")
-
-print("\nGeneralised (reduced) mass matrix  M = B^T M_body B:")
-M_np = np.array(eom.M)
-print(M_np)
-
-eigvals = np.linalg.eigvalsh(M_np.astype(float))
-print(f"\nEigenvalues (all > 0 = positive definite): {eigvals}")
-print(f"Symmetry error max|M - M^T|: {np.max(np.abs(M_np - M_np.T)):.2e}")
+print(f"\nIntegration {'succeeded' if sol.result == _diffrax.RESULTS.successful else 'FAILED'}")
+print(f"Output shape (time x state): {sol.ys.shape}")
+n_qi = mbd.total_cfg_dof
+print(f"Final q_int: {np.array(sol.ys[-1, :n_qi]).round(4)}")
+print(f"Final qd:    {np.array(sol.ys[-1, n_qi:]).round(4)}")
 

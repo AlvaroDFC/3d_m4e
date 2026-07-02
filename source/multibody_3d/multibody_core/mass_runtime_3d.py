@@ -304,4 +304,23 @@ def make_eom_evaluator_mainint(
             geom = extractor.evaluate(bp)
             return _jit_eom(q, qd, *_np_geom_to_jax(*geom))
 
+        def _freeze(body_params_np):
+            """Return a ``@jax.jit`` evaluator with geometry frozen for *body_params_np*.
+
+            Fully JAX-traceable: the extractor call (requires concrete values)
+            runs once here at freeze time rather than at every eval.
+            """
+            geom = extractor.evaluate(np.asarray(body_params_np, dtype=float))
+            _p2j_f, _j2c_f, _u_f, _u1_f, _u2_f = _np_geom_to_jax(*geom)
+
+            @jax.jit
+            def _frozen(mainNumVars_int):
+                v     = jnp.asarray(mainNumVars_int, dtype=jnp.float64)
+                q_int = v[qi_start: qi_start + n_qi]
+                qd    = v[qd_start: qd_start + n_qd]
+                return _compute_eom(q_int, qd, _p2j_f, _j2c_f, _u_f, _u1_f, _u2_f)
+
+            return _frozen
+
+        _eval_eom.freeze = _freeze
         return _eval_eom

@@ -275,7 +275,7 @@ class MbdSystem3D:
             self._geom_extractor, self._slc_body_int,
         )
         # Build JAX point evaluator if Initial_Points was supplied.
-        if self.sym_points is not None and self.Initial_Points:
+        if not self.sym_points and self.Initial_Points:
             self.points_func, self._points_spec = make_points_evaluator_mainint(
                 self.sym_points,
                 list(self.points_sym.values()),
@@ -1043,6 +1043,54 @@ class MbdSystem3D:
         return _sym_fr(rec, force_vec)
 
     # ── Ergonomic helpers ────────────────────────────────────────────────────
+
+    def integrate(
+        self,
+        mainNumVars,
+        *,
+        tspan,
+        dt=None,
+        rtol: float = 1e-6,
+        atol: float = 1e-6,
+        algorithm: str = "Dopri5",
+        max_steps: int = 500_000,
+    ):
+        """Numerically integrate the equations of motion.
+
+        Delegates to :func:`integrator_3d.integrate_3d`.  The system must
+        have ``body_inertia`` declared so that ``eom_func`` is compiled.
+
+        Parameters
+        ----------
+        mainNumVars : array_like, shape ``(len(mainSymVars),)``
+            Initial user-facing variable vector
+            ``[q_user, qd, body_params, force_params, point_params]``.
+        tspan : float or (float, float)
+            End time (start = 0) or ``(t_start, t_end)``.
+        dt : float or None
+            Output time step.  *None* uses the solver's adaptive grid.
+        rtol, atol : float
+            ODE solver tolerances.
+        algorithm : str
+            Diffrax solver name (``"Dopri5"``, ``"Dopri8"``, ``"Tsit5"``, …).
+        max_steps : int
+            Maximum number of internal solver steps before raising an error.
+
+        Returns
+        -------
+        diffrax.Solution
+            ``sol.ts`` — time vector, ``sol.ys`` — state history
+            (shape ``(n_steps, total_cfg_dof + total_dof)``).
+            ``sol.result == 0`` indicates success.
+        """
+        from .integrator_3d import integrate_3d  # noqa: PLC0415
+        return integrate_3d(
+            self, mainNumVars,
+            tspan=tspan, dt=dt,
+            rtol=rtol, atol=atol,
+            algorithm=algorithm,
+            max_steps=max_steps,
+        )
 
     def summary_table(self, precision: int = 3):
         """Print a summary table of joint information (delegates to joint_system)."""
