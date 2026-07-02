@@ -1,6 +1,6 @@
 # main file to run multibody 3D examples
 from multibody_3d import MbdSystem3D
-import example7 as ex
+import example9 as ex
 import numpy as np
 from time import time
 
@@ -29,8 +29,8 @@ mbd.summary_table(precision=3)
 # # qd_np = np.array([0.7, -0.3, 0.4, 1.2])
 # # Example 4 ic
 # Internal q for constructing q_user (F-joint uses quaternion internally)
-q_int_np = np.array([0. ,0. ,0. ,np.cos(np.pi/6) ,0.9659*np.sin(np.pi/6) ,0. ,0.2588*np.sin(np.pi/6), 0.1, 0.2, 0.3])
-qd_np = np.array([1. ,1. ,2. , 1., 2., 3., 0.1, 0.2, 0.3])
+# q_int_np = np.array([0. ,0. ,0. ,np.cos(np.pi/6) ,0.9659*np.sin(np.pi/6) ,0. ,0.2588*np.sin(np.pi/6), 0.1, 0.2, 0.3])
+# qd_np = np.array([1. ,1. ,2. , 1., 2., 3., 0.1, 0.2, 0.3])
 # # Example 5 ic: R - R- P - R
 # # q_int_np = np.array([np.pi/6, 0.3, 2, 1.1])
 # # qd_np = np.array([0.7, -0.3, 0.4, 1.2])
@@ -40,12 +40,16 @@ qd_np = np.array([1. ,1. ,2. , 1., 2., 3., 0.1, 0.2, 0.3])
 
 # Build user-facing mainNumVars = [q_user, qd, body_params, force_params]
 # example7 has R and L as body params; supply numeric values here.
+# q_user_np    = mbd.map_q_int_to_q_user(q_int_np)
+# body_params  = np.array([0.5, 1.0])   # R=0.5, L=1.0
+# points_params = np.array([0.3])         # d4=0.3 (endpoint location along link 3 axis)
+# force_params = np.array([1., 1., 1.])            # Fx1=1, Fy1=1, Fz1=1 (world-frame CG force on body 1)
+# example 9, the double pendulum, has no body params or force params, so mainNumVars is just [q_user, qd].
+q_int_np = np.array([0.0 ,0.0])
+qd_np = np.array([1.,-1])
 q_user_np    = mbd.map_q_int_to_q_user(q_int_np)
-body_params  = np.array([0.5, 1.0])   # R=0.5, L=1.0
-points_params = np.array([0.3])         # d4=0.3 (endpoint location along link 3 axis)
-force_params = np.array([1., 1., 1.])            # Fx1=1, Fy1=1, Fz1=1 (world-frame CG force on body 1)
-mainNumVars  = np.concatenate([q_user_np, qd_np, body_params, force_params, points_params])
-
+# mainNumVars  = np.concatenate([q_user_np, qd_np, body_params, force_params, points_params])
+mainNumVars  = np.concatenate([q_user_np, qd_np])
 # ####################### Time evaluation ############################################
 # Testing setup
 n = 1
