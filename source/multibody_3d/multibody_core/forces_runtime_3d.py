@@ -613,6 +613,25 @@ def make_forces_evaluator_mainint(
             rl  = jnp.asarray(_eval_r_locals(bp, pp), dtype=jnp.float64)
             return _jit_forces(q, qd, rl, cv)
 
+        def _freeze(body_params_np, force_params_np, points_params_np):
+            """Return a ``@jax.jit`` forces evaluator with all constant params frozen."""
+            bp = np.asarray(body_params_np,   dtype=float)
+            fp = np.asarray(force_params_np,  dtype=float)
+            pp = np.asarray(points_params_np, dtype=float)
+            _cv_f = jnp.asarray(_eval_const_vals(fp, pp), dtype=jnp.float64)
+            _rl_f = jnp.asarray(_eval_r_locals(bp, pp),   dtype=jnp.float64)
+
+            @jax.jit
+            def _frozen(mainNumVars_int):
+                v     = jnp.asarray(mainNumVars_int, dtype=jnp.float64)
+                q_int = v[qi_start: qi_start + n_qi]
+                qd    = v[qd_start: qd_start + n_qd]
+                return _jit_forces(q_int, qd, _rl_f, _cv_f)
+
+            return _frozen
+
+        _evaluate.freeze = _freeze
+
     else:
         # ---- parameterized geometry ----
         topo_kw      = _convert_topology_to_jax(params)
@@ -654,5 +673,26 @@ def make_forces_evaluator_mainint(
             cv  = jnp.asarray(_eval_const_vals(fp, pp), dtype=jnp.float64)
             rl  = jnp.asarray(_eval_r_locals(bp, pp), dtype=jnp.float64)
             return _jit_forces(q, qd, rl, cv, *_np_geom_to_jax(*geom))
+
+        def _freeze(body_params_np, force_params_np, points_params_np):
+            """Return a ``@jax.jit`` forces evaluator with all constant params frozen."""
+            bp = np.asarray(body_params_np,   dtype=float)
+            fp = np.asarray(force_params_np,  dtype=float)
+            pp = np.asarray(points_params_np, dtype=float)
+            geom = extractor.evaluate(bp)
+            _cv_f = jnp.asarray(_eval_const_vals(fp, pp), dtype=jnp.float64)
+            _rl_f = jnp.asarray(_eval_r_locals(bp, pp),   dtype=jnp.float64)
+            _p2j_f, _j2c_f, _u_f, _u1_f, _u2_f = _np_geom_to_jax(*geom)
+
+            @jax.jit
+            def _frozen(mainNumVars_int):
+                v     = jnp.asarray(mainNumVars_int, dtype=jnp.float64)
+                q_int = v[qi_start: qi_start + n_qi]
+                qd    = v[qd_start: qd_start + n_qd]
+                return _jit_forces(q_int, qd, _rl_f, _cv_f, _p2j_f, _j2c_f, _u_f, _u1_f, _u2_f)
+
+            return _frozen
+
+        _evaluate.freeze = _freeze
 
     return _evaluate
