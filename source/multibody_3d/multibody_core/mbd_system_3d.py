@@ -205,20 +205,7 @@ class MbdSystem3D:
                             list(self.force_points_sym.values()) +
                             list(self.points_sym.values()))
         self._build_slice_metadata()
-        # Build symbolic points cache and JAX point evaluator if Initial_Points was supplied.
-        # TODO: initial points and forces defnition may have different symbolic parameters. Are both allowed?
-        if self.Initial_Points:
-            _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
-            self.sym_points = build_points_symbolic(
-                self.Initial_Points, _pos_cache, self.NBodies,
-            )
-        elif self.forces_def is not None:
-            # No Initial_Points, but Force is declared: build pos_cache
-            # for torsion axes; sym_points gets only CG records.
-            _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
-            self.sym_points = build_points_symbolic({}, _pos_cache, self.NBodies)
-        else:
-            _pos_cache = None
+        
         # Build runtime state once: frozen geometry params + JIT-compiled evaluators.
         self._numeric_params = self.vt.build_numeric_params()
         self._geom_extractor = self.vt.build_geometry_extractor(
@@ -234,6 +221,21 @@ class MbdSystem3D:
             self._slc_q_int, self._slc_qd_int,
             self._geom_extractor, self._slc_body_int,
         )
+
+        # Build symbolic points cache and JAX point evaluator if Initial_Points was supplied.
+        # TODO: initial points and forces defnition may have different symbolic parameters. Are both allowed?
+        if self.Initial_Points:
+            _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
+            self.sym_points = build_points_symbolic(
+                self.Initial_Points, _pos_cache, self.NBodies,
+            )
+        elif self.forces_def is not None:
+            # No Initial_Points, but Force is declared: build pos_cache
+            # for torsion axes; sym_points gets only CG records.
+            _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
+            self.sym_points = build_points_symbolic({}, _pos_cache, self.NBodies)
+        else:
+            _pos_cache = None
         # Build JAX point evaluator if Initial_Points was supplied.
         if self.sym_points is not None and self.Initial_Points:
             self.points_func, self._points_spec = make_points_evaluator_mainint(
@@ -441,6 +443,7 @@ class MbdSystem3D:
         -------
         q_user_np, qd_np, body_params_np, force_params_np, point_params_np : np.ndarray
         """
+        # TODO: is this used?
         return (
             mainNumVars[self._slc_q_user],
             mainNumVars[self._slc_qd],
@@ -449,6 +452,7 @@ class MbdSystem3D:
             mainNumVars[self._slc_points],
         )
 
+    # TODO: this may be unnecessary as it should already exist?
     def _build_mainNumVars_int(self, mainNumVars: np.ndarray) -> np.ndarray:
         """Build the internal variable vector from a validated *mainNumVars*.
 
@@ -462,6 +466,7 @@ class MbdSystem3D:
         np.ndarray, shape ``(len(mainSymVars_int),)``
             Ordered as ``[q_int, qd, body_params, force_params]``.
         """
+       
         q_int_np = self.joint_system.map_q_user_to_q_int(
             mainNumVars[self._slc_q_user]
         )
@@ -473,6 +478,7 @@ class MbdSystem3D:
             mainNumVars[self._slc_points],
         ])
 
+    # TODO: this may be unnecessary as it should already exist?
     def _extract_q_int_qd(
         self, mainNumVars
     ) -> "tuple[np.ndarray, np.ndarray]":
@@ -491,6 +497,7 @@ class MbdSystem3D:
         q_int_np : np.ndarray, shape ``(total_cfg_dof,)``
         qd_np : np.ndarray, shape ``(total_dof,)``
         """
+        # TODO: is this necessary?
         arr = self._validate_mainNumVars_shape(mainNumVars)
         q_int_np = self.joint_system.map_q_user_to_q_int(arr[self._slc_q_user])
         return q_int_np, arr[self._slc_qd]

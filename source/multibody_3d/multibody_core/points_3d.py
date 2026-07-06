@@ -445,7 +445,7 @@ class PointsRuntimeSpec:
     body_ids:       tuple   # tuple[int, ...]
     pt_body_slices: dict    # dict[int, slice]
 
-
+# does this make sense from the AD stand point? --> To separate sympy scope from JAX scope it does
 def _make_r_local_fn(r_local_sym: "sym.Matrix", body_sym_list: list, points_sym_list: list):
     """Return a callable ``fn(*body_sym_vals, *point_sym_vals) -> np.ndarray(3,)``.
 
