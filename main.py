@@ -135,18 +135,18 @@ blk = blocks[(1, 0)]
 # print(float(forces.spring_potential_energy))
 
 ####### Integration ######################################################
-# Mass and body-frame inertia for each of the 4 bodies (example7: F + 3R).
-# Adjust these values to match the actual mass properties of your system.
-m_vals = np.array([1.0, 0.5])      # mass [kg] per body
-# Inertia tensors in body principal frame, shape (NBodies, 3) → diagonal
-J_vals = 100*np.array([
-    [0.01, 0.01, 0.01],   # body 1 (floating base)
-    [0.01, 0.01, 0.01],   # body 2 (link 1)
-])
+# Masses: read from example's Force["Gravity"]["mass"] if defined.
+_ex_masses = getattr(ex, 'Force', {}).get('Gravity', {}).get('mass', {})
+# Inertia: read from example's J_body_imm (full 3×3) if defined.
+_ex_J      = getattr(ex, 'J_body_imm', {})
 
 # Rebuild mbd with body_inertia so that eom_func / mass_func are available.
 body_inertia = {
-    b: {'mass': float(m_vals[b - 1]), 'J': np.diag(J_vals[b - 1])}
+    b: {
+        'mass': float(_ex_masses.get(b, 1.0)),
+        'J':   np.asarray(_ex_J[b], dtype=float) if b in _ex_J
+               else np.eye(3) * 0.01,
+    }
     for b in range(1, mbd.NBodies + 1)
 }
 mbd = MbdSystem3D(
@@ -221,7 +221,12 @@ _BCACHE_KEYS = frozenset({
     "n_bodies", "n_joints", "parent", "child", "codes",
     "cfg_slices", "p2j", "j2c", "u", "u1", "u2",
 })
-g_acc = 0.0    # gravity disabled (zero-g simulation)
+# Gravity vector from example's Force["Gravity"]["g_vec"] (zero if not defined)
+_g_vec_np  = np.array(
+    getattr(ex, 'Force', {}).get('Gravity', {}).get('g_vec', [0, 0, 0]),
+    dtype=float,
+)
+_g_vec_jax = jnp.asarray(_g_vec_np, dtype=jnp.float64)
 
 # ── Constant parameter blocks (same ones used during integration) ───────────
 _arr_nv  = mbd._validate_mainNumVars_shape(mainNumVars)
@@ -270,18 +275,18 @@ def _compute_energy(y):
     eom_res   = _eom_e(mainint_y)
     M_gen     = eom_res.M
     KE        = 0.5 * (qd @ M_gen @ qd)
-    # Potential energy: V = Σ_b m_b · g · z_cg_b
+    # Potential energy: V = -Σ_b m_b · (g_vec · r_cg_b)  [general gravity direction]
     _, r_abs, _, _, _ = build_cache_jax(q_int, **_ckw)
-    z_cg = jnp.stack([r_abs[b + 1][2, 0] for b in range(_NB_e)])
-    PE   = jnp.dot(_masses_e, g_acc * z_cg)
+    r_cg = jnp.stack([r_abs[b + 1].ravel() for b in range(_NB_e)])  # (NB, 3)
+    PE   = -jnp.dot(_masses_e, r_cg @ _g_vec_jax)
     # Per-body energies
     B      = eom_res.B       # (6*NB, total_dof)
     M_body = eom_res.M_body  # (6*NB, 6*NB)
-    KE_b   = jnp.array([
+    KE_b   = jnp.stack([
         0.5 * (B[6*b:6*b+6, :] @ qd) @ M_body[6*b:6*b+6, 6*b:6*b+6] @ (B[6*b:6*b+6, :] @ qd)
         for b in range(_NB_e)
     ])
-    PE_b   = _masses_e * g_acc * z_cg   # (NB,)
+    PE_b   = -_masses_e * (r_cg @ _g_vec_jax)   # (NB,)
     return KE, PE, KE_b, PE_b
 
 KE_arr, PE_arr, KE_body, PE_body = jax.vmap(_compute_energy)(
