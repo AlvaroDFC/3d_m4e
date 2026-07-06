@@ -13,6 +13,7 @@ from .multibody_core.velocity_transformation_3d import (
 )
 from .multibody_core.joint_coordinate_3d import build_joint_coordinates, CoordBundle
 from .multibody_core.mbd_system_3d import MbdSystem3D
+from .multibody_core.integrator_3d import integrate_3d
 from .multibody_core.force_definition_3d import (
     CGForceDef,
     PointForceDef,
