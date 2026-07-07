@@ -217,93 +217,10 @@ plt.show()
 
 ####### Kinetic and potential energy over time ##################################
 import jax.numpy as jnp
-from multibody_3d.multibody_core.velocity_transformation_3d import (
-    build_cache_jax,
-    _convert_geometry_to_jax,
-    _convert_topology_to_jax,
-    _np_geom_to_jax,
-)
 
-_BCACHE_KEYS = frozenset({
-    "n_bodies", "n_joints", "parent", "child", "codes",
-    "cfg_slices", "p2j", "j2c", "u", "u1", "u2",
-})
-# Gravity vector from example's Force["Gravity"]["g_vec"] (zero if not defined)
-_g_vec_np  = np.array(
-    getattr(ex, 'Force', {}).get('Gravity', {}).get('g_vec', [0, 0, 0]),
-    dtype=float,
-)
-_g_vec_jax = jnp.asarray(_g_vec_np, dtype=jnp.float64)
-
-# ── Constant parameter blocks (same ones used during integration) ───────────
-_arr_nv  = mbd._validate_mainNumVars_shape(mainNumVars)
-_mint0   = mbd._build_mainNumVars_int(_arr_nv)
-_bp_np   = np.array(_mint0[mbd._slc_body_int],   dtype=float)
-_fp_np   = np.array(_mint0[mbd._slc_force_int],  dtype=float)
-_pp_np   = np.array(_mint0[mbd._slc_points_int], dtype=float)
-
-# ── Freeze EOM evaluator (bakes geometry into the JIT closure) ───────────────
-_eom_e = (
-    mbd.eom_func.freeze(_bp_np)
-    if hasattr(mbd.eom_func, "freeze")
-    else mbd.eom_func
-)
-
-# ── Body masses ordered by body id ───────────────────────────────────────────
-_masses_e = jnp.array(
-    [_ex_bi[b]["mass"] for b in sorted(_ex_bi)],
-    dtype=jnp.float64,
-)
-
-# ── Kinematic cache kwargs (constant or parameterised geometry) ───────────────
-if mbd._geom_extractor.has_dynamic:
-    _p2j_e, _j2c_e, _u_e, _u1_e, _u2_e = _np_geom_to_jax(
-        *mbd._geom_extractor.evaluate(_bp_np)
-    )
-    _ckw = {k: v for k, v in _convert_topology_to_jax(mbd._numeric_params).items()
-            if k in _BCACHE_KEYS}
-    _ckw.update(p2j=_p2j_e, j2c=_j2c_e, u=_u_e, u1=_u1_e, u2=_u2_e)
-else:
-    _ckw = {k: v for k, v in _convert_geometry_to_jax(mbd._numeric_params).items()
-            if k in _BCACHE_KEYS}
-
-_NB_e   = mbd.NBodies
-_n_qi_e = mbd.total_cfg_dof
-_cb_e   = jnp.asarray(_bp_np, dtype=jnp.float64)
-_cf_e   = jnp.asarray(_fp_np, dtype=jnp.float64)
-_cp_e   = jnp.asarray(_pp_np, dtype=jnp.float64)
-
-@jax.jit
-def _compute_energy(y):
-    q_int     = y[:_n_qi_e]
-    qd        = y[_n_qi_e:]
-    # Kinetic energy: T = ½ qd^T M(q) qd  (M = B^T M_body B)
-    mainint_y = jnp.concatenate([q_int, qd, _cb_e, _cf_e, _cp_e])
-    eom_res   = _eom_e(mainint_y)
-    M_gen     = eom_res.M
-    KE        = 0.5 * (qd @ M_gen @ qd)
-    # Potential energy: V = -Σ_b m_b · (g_vec · r_cg_b)  [general gravity direction]
-    _, r_abs, _, _, _ = build_cache_jax(q_int, **_ckw)
-    r_cg = jnp.stack([r_abs[b + 1].ravel() for b in range(_NB_e)])  # (NB, 3)
-    PE   = -jnp.dot(_masses_e, r_cg @ _g_vec_jax)
-    # Per-body energies
-    B      = eom_res.B       # (6*NB, total_dof)
-    M_body = eom_res.M_body  # (6*NB, 6*NB)
-    KE_b   = jnp.stack([
-        0.5 * (B[6*b:6*b+6, :] @ qd) @ M_body[6*b:6*b+6, 6*b:6*b+6] @ (B[6*b:6*b+6, :] @ qd)
-        for b in range(_NB_e)
-    ])
-    PE_b   = -_masses_e * (r_cg @ _g_vec_jax)   # (NB,)
-    return KE, PE, KE_b, PE_b
-
-KE_arr, PE_arr, KE_body, PE_body = jax.vmap(_compute_energy)(
-    jnp.asarray(sol.ys, dtype=jnp.float64)
-)
-KE_arr  = np.array(KE_arr)
-PE_arr  = np.array(PE_arr)
-E_total = KE_arr + PE_arr
-KE_body = np.array(KE_body)   # (n_steps, NB)
-PE_body = np.array(PE_body)   # (n_steps, NB)
+energy  = mbd.compute_energy(sol, mainNumVars)
+KE_arr, PE_arr, E_total  = energy.KE, energy.PE, energy.E_total
+KE_body, PE_body         = energy.KE_body, energy.PE_body
 
 # ── System totals ────────────────────────────────────────────────────────────
 fig_e, ax_e = plt.subplots(figsize=(10, 4))
@@ -323,7 +240,7 @@ fig_b, axes_b = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
 
 ax_ke = axes_b[0]
 ax_pe = axes_b[1]
-for b in range(_NB_e):
+for b in range(mbd.NBodies):
     lbl = f"body {b + 1}"
     ax_ke.plot(ts, KE_body[:, b], label=lbl)
     ax_pe.plot(ts, PE_body[:, b], label=lbl)
@@ -343,6 +260,24 @@ plt.tight_layout()
 plt.show()
 
 # ── Per-body linear and angular velocities ───────────────────────────────────
+# Constant parameter blocks + frozen eom evaluator (kinematics only; reused
+# below, not part of the energy postprocessing above).
+_arr_nv = mbd._validate_mainNumVars_shape(mainNumVars)
+_mint0  = mbd._build_mainNumVars_int(_arr_nv)
+_bp_np  = np.array(_mint0[mbd._slc_body_int],   dtype=float)
+_fp_np  = np.array(_mint0[mbd._slc_force_int],  dtype=float)
+_pp_np  = np.array(_mint0[mbd._slc_points_int], dtype=float)
+_eom_e  = (
+    mbd.eom_func.freeze(_bp_np)
+    if hasattr(mbd.eom_func, "freeze")
+    else mbd.eom_func
+)
+_n_qi_e = mbd.total_cfg_dof
+_NB_e   = mbd.NBodies
+_cb_e   = jnp.asarray(_bp_np, dtype=jnp.float64)
+_cf_e   = jnp.asarray(_fp_np, dtype=jnp.float64)
+_cp_e   = jnp.asarray(_pp_np, dtype=jnp.float64)
+
 @jax.jit
 def _body_velocities(y):
     """Returns v_lin (NB,3) and v_ang (NB,3) for each body."""

@@ -1119,6 +1119,33 @@ class MbdSystem3D:
             max_steps=max_steps,
         )
 
+    def compute_energy(self, sol, mainNumVars):
+        """Compute kinetic / potential energy time series from an integrated solution.
+
+        Postprocessing operation — not part of :meth:`integrate`.  Re-evaluates
+        ``eom_func`` and position kinematics at every saved state in *sol* to
+        recover generalised mass and CG positions, combined with gravity to
+        give per-step, per-body mechanical energy.
+
+        Delegates to :func:`mass_runtime_3d.compute_energy_3d`.  The system
+        must have ``body_inertia`` declared so that ``eom_func`` is compiled.
+
+        Parameters
+        ----------
+        sol : diffrax.Solution
+            Result of :meth:`integrate` (uses ``sol.ts``, ``sol.ys``).
+        mainNumVars : array_like, shape ``(len(mainSymVars),)``
+            The same vector passed to :meth:`integrate`; supplies the
+            constant body/force/point parameter blocks.
+
+        Returns
+        -------
+        mass_runtime_3d.EnergyResult
+            ``ts``, ``KE``, ``PE``, ``E_total``, ``KE_body``, ``PE_body``.
+        """
+        from .mass_runtime_3d import compute_energy_3d  # noqa: PLC0415
+        return compute_energy_3d(self, sol, mainNumVars)
+
     def summary_table(self, precision: int = 3):
         """Print a summary table of joint information (delegates to joint_system)."""
         return self.joint_system.summary_table(precision=precision)

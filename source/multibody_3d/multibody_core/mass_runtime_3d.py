@@ -13,6 +13,12 @@ Public factories
     Computes B, Bdot, M_body, and M in **a single kinematics pass** —
     preferred in integrator loops where all four quantities are needed.
 
+``compute_energy_3d``
+    Postprocessing helper ``f(mbd, sol, mainNumVars) -> EnergyResult``.
+    Computes kinetic/potential energy time series from an already-integrated
+    solution.  Not part of the integration loop itself — call after
+    :meth:`MbdSystem3D.integrate`.
+
 Design
 ------
 * Both factories follow the two-branch (constant / parameterised geometry)
@@ -27,7 +33,7 @@ Design
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, NamedTuple
+from typing import Any, Dict, List, NamedTuple, TYPE_CHECKING
 
 import numpy as np
 import sympy as sym
@@ -42,6 +48,9 @@ except ImportError:  # pragma: no cover
 
 if not _JAX_AVAILABLE:
     raise ImportError("JAX is required for mass_runtime_3d.")
+
+if TYPE_CHECKING:
+    from .mbd_system_3d import MbdSystem3D
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +89,30 @@ class EomKernelResult(NamedTuple):
     Bdot:   "jnp.ndarray"
     M_body: "jnp.ndarray"
     M:      "jnp.ndarray"
+
+
+class EnergyResult(NamedTuple):
+    """Kinetic / potential energy time series from an integrated solution.
+
+    Produced by :func:`compute_energy_3d` (called via
+    :meth:`MbdSystem3D.compute_energy`).  All arrays are plain ``numpy``
+    (already pulled off the JAX device).
+
+    Attributes
+    ----------
+    ts : ndarray, shape ``(n_steps,)``
+        Time points; mirrors ``sol.ts``.
+    KE, PE, E_total : ndarray, shape ``(n_steps,)``
+        System-level kinetic, potential, and total mechanical energy.
+    KE_body, PE_body : ndarray, shape ``(n_steps, NBodies)``
+        Per-body kinetic and potential energy.
+    """
+    ts:      "np.ndarray"
+    KE:      "np.ndarray"
+    PE:      "np.ndarray"
+    E_total: "np.ndarray"
+    KE_body: "np.ndarray"
+    PE_body: "np.ndarray"
 
 
 # ---------------------------------------------------------------------------
@@ -324,3 +357,151 @@ def make_eom_evaluator_mainint(
 
         _eval_eom.freeze = _freeze
         return _eval_eom
+
+
+# ---------------------------------------------------------------------------
+# Energy postprocessing (not part of the integration loop)
+# ---------------------------------------------------------------------------
+
+_BCACHE_KEYS = frozenset({
+    "n_bodies", "n_joints", "parent", "child", "codes",
+    "cfg_slices", "p2j", "j2c", "u", "u1", "u2",
+})
+
+
+def compute_energy_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> EnergyResult:
+    """Compute kinetic / potential energy time series from an integrated solution.
+
+    This is a postprocessing operation, not part of the ODE right-hand side:
+    it re-evaluates ``mbd.eom_func`` and the position kinematics at every
+    saved state in *sol* to recover generalised mass and CG positions, then
+    combines them with gravity to obtain per-step, per-body mechanical energy.
+
+    Parameters
+    ----------
+    mbd : MbdSystem3D
+        System with ``body_inertia`` declared (``eom_func`` must not be
+        *None*).
+    sol : diffrax.Solution
+        Result of :meth:`MbdSystem3D.integrate` (or :func:`integrate_3d`).
+        Uses ``sol.ts`` and ``sol.ys``.
+    mainNumVars : array_like, shape ``(len(mainSymVars),)``
+        The same user-facing vector passed to :meth:`MbdSystem3D.integrate`;
+        supplies the constant body/force/point parameter blocks (assumed
+        unchanged throughout the integration).
+
+    Returns
+    -------
+    EnergyResult
+
+    Raises
+    ------
+    RuntimeError
+        If ``mbd.eom_func`` is *None* or ``mbd.body_inertia`` is empty.
+    """
+    if mbd.eom_func is None:
+        raise RuntimeError(
+            "compute_energy_3d() requires body_inertia to be declared.  "
+            "eom_func is None."
+        )
+    if not mbd.body_inertia:
+        raise RuntimeError(
+            "compute_energy_3d() requires mbd.body_inertia to be non-empty."
+        )
+
+    # ── Deferred imports (mirrors make_eom_evaluator_mainint's pattern) ─────
+    try:
+        from .velocity_transformation_3d import (   # noqa: PLC0415
+            build_cache_jax,
+            _convert_geometry_to_jax,
+            _convert_topology_to_jax,
+            _np_geom_to_jax,
+        )
+    except Exception:  # pragma: no cover
+        from velocity_transformation_3d import (
+            build_cache_jax,
+            _convert_geometry_to_jax,
+            _convert_topology_to_jax,
+            _np_geom_to_jax,
+        )
+
+    NB   = mbd.NBodies
+    n_qi = mbd.total_cfg_dof
+
+    # ── Gravity vector and per-body applied fraction ────────────────────────
+    gd = mbd.forces_def.gravity if mbd.forces_def is not None else None
+    g_vec_np = np.asarray(gd.g_vec, dtype=float) if gd is not None else np.zeros(3)
+    g_app_np = np.asarray(gd.g_app, dtype=float) if gd is not None else np.ones(NB)
+    g_vec_jax = jnp.asarray(g_vec_np, dtype=jnp.float64)
+
+    # ── Per-body weight = g_app * mass, ordered by body id ──────────────────
+    masses_np   = np.array([mbd.body_inertia[b]["mass"] for b in range(1, NB + 1)])
+    weights_jax = jnp.asarray(g_app_np * masses_np, dtype=jnp.float64)
+
+    # ── Constant parameter blocks (same ones used during integration) ──────
+    arr   = mbd._validate_mainNumVars_shape(mainNumVars)
+    mint0 = mbd._build_mainNumVars_int(arr)
+    bp_np = np.array(mint0[mbd._slc_body_int],   dtype=float)
+    fp_np = np.array(mint0[mbd._slc_force_int],  dtype=float)
+    pp_np = np.array(mint0[mbd._slc_points_int], dtype=float)
+
+    # ── Freeze EOM evaluator (bakes geometry into the JIT closure) ──────────
+    eom_e = (
+        mbd.eom_func.freeze(bp_np)
+        if hasattr(mbd.eom_func, "freeze")
+        else mbd.eom_func
+    )
+
+    # ── Kinematic cache kwargs (constant or parameterised geometry) ─────────
+    if mbd._geom_extractor.has_dynamic:
+        p2j_e, j2c_e, u_e, u1_e, u2_e = _np_geom_to_jax(
+            *mbd._geom_extractor.evaluate(bp_np)
+        )
+        ckw = {k: v for k, v in _convert_topology_to_jax(mbd._numeric_params).items()
+               if k in _BCACHE_KEYS}
+        ckw.update(p2j=p2j_e, j2c=j2c_e, u=u_e, u1=u1_e, u2=u2_e)
+    else:
+        ckw = {k: v for k, v in _convert_geometry_to_jax(mbd._numeric_params).items()
+               if k in _BCACHE_KEYS}
+
+    cb_e = jnp.asarray(bp_np, dtype=jnp.float64)
+    cf_e = jnp.asarray(fp_np, dtype=jnp.float64)
+    cp_e = jnp.asarray(pp_np, dtype=jnp.float64)
+
+    @jax.jit
+    def _energy_at(y):
+        q_int = y[:n_qi]
+        qd    = y[n_qi:]
+        # Kinetic energy: T = ½ qd^T M(q) qd  (M = B^T M_body B)
+        mainint_y = jnp.concatenate([q_int, qd, cb_e, cf_e, cp_e])
+        eom_res   = eom_e(mainint_y)
+        M_gen     = eom_res.M
+        KE        = 0.5 * (qd @ M_gen @ qd)
+        # Potential energy: V = -Σ_b (g_app_b · m_b) · (g_vec · r_cg_b)
+        _, r_abs, _, _, _ = build_cache_jax(q_int, **ckw)
+        r_cg = jnp.stack([r_abs[b + 1].ravel() for b in range(NB)])  # (NB, 3)
+        PE   = -jnp.dot(weights_jax, r_cg @ g_vec_jax)
+        # Per-body energies
+        B      = eom_res.B       # (6*NB, total_dof)
+        M_body = eom_res.M_body  # (6*NB, 6*NB)
+        KE_b   = jnp.stack([
+            0.5 * (B[6*b:6*b+6, :] @ qd) @ M_body[6*b:6*b+6, 6*b:6*b+6] @ (B[6*b:6*b+6, :] @ qd)
+            for b in range(NB)
+        ])
+        PE_b = -weights_jax * (r_cg @ g_vec_jax)   # (NB,)
+        return KE, PE, KE_b, PE_b
+
+    KE_arr, PE_arr, KE_body, PE_body = jax.vmap(_energy_at)(
+        jnp.asarray(sol.ys, dtype=jnp.float64)
+    )
+    KE_arr  = np.array(KE_arr)
+    PE_arr  = np.array(PE_arr)
+    E_total = KE_arr + PE_arr
+    KE_body = np.array(KE_body)   # (n_steps, NB)
+    PE_body = np.array(PE_body)   # (n_steps, NB)
+    ts      = np.array(sol.ts)
+
+    return EnergyResult(
+        ts=ts, KE=KE_arr, PE=PE_arr, E_total=E_total,
+        KE_body=KE_body, PE_body=PE_body,
+    )
