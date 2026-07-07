@@ -1146,6 +1146,61 @@ class MbdSystem3D:
         from .mass_runtime_3d import compute_energy_3d  # noqa: PLC0415
         return compute_energy_3d(self, sol, mainNumVars)
 
+    def build_runtime_context(self, mainNumVars):
+        """Freeze body/force/point parameters and geometry for one integrate/postprocess cycle.
+
+        These parameters are constant for the whole duration of one
+        :meth:`integrate` call (they only change across separate
+        ``integrate`` calls, e.g. in a design-exploration loop).  Postprocessing
+        consumers such as :meth:`compute_energy` and :meth:`compute_kinematics`
+        build (or accept) a shared context instead of independently
+        re-deriving the same frozen evaluators and kinematics kwargs.
+
+        Delegates to :func:`runtime_context_3d.build_runtime_context`.
+
+        Parameters
+        ----------
+        mainNumVars : array_like, shape ``(len(mainSymVars),)``
+            The same vector passed to :meth:`integrate`.
+
+        Returns
+        -------
+        runtime_context_3d.RuntimeContext
+        """
+        from .runtime_context_3d import build_runtime_context  # noqa: PLC0415
+        return build_runtime_context(self, mainNumVars)
+
+    def compute_kinematics(self, sol, mainNumVars):
+        """Compute CG and declared body-point trajectories from an integrated solution.
+
+        Postprocessing operation — not part of :meth:`integrate`.  Re-evaluates
+        position/rate kinematics at every saved state in *sol* to recover, for
+        every body, CG translation/rotation and linear/angular velocity, plus
+        world-frame position/velocity of every point declared in
+        ``Initial_Points["BD"]``.
+
+        Unlike :meth:`compute_energy`, this does **not** require
+        ``body_inertia`` to be declared — only geometry is used.
+
+        Delegates to :func:`kinematics_runtime_3d.compute_kinematics_3d`.
+
+        Parameters
+        ----------
+        sol : diffrax.Solution
+            Result of :meth:`integrate` (uses ``sol.ts``, ``sol.ys``).
+        mainNumVars : array_like, shape ``(len(mainSymVars),)``
+            The same vector passed to :meth:`integrate`; supplies the
+            constant body/force/point parameter blocks.
+
+        Returns
+        -------
+        kinematics_runtime_3d.KinematicsResult
+            ``ts``, ``r_cg``, ``R_cg``, ``euler_cg``, ``v_cg``, ``omega_cg``,
+            ``r_pts``, ``v_pts``, ``point_body_ids``, ``pt_body_slices``.
+        """
+        from .kinematics_runtime_3d import compute_kinematics_3d  # noqa: PLC0415
+        return compute_kinematics_3d(self, sol, mainNumVars)
+
     def summary_table(self, precision: int = 3):
         """Print a summary table of joint information (delegates to joint_system)."""
         return self.joint_system.summary_table(precision=precision)
