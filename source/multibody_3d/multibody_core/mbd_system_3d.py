@@ -228,6 +228,11 @@ class MbdSystem3D:
         # Parse Force dictionary early so validation fires before any
         # expensive symbolic or JAX work.
         if self.Force:
+            if "Gravity" in self.Force and not self.body_inertia:
+                raise ValueError(
+                    "Force['Gravity'] is declared but body_inertia is empty. "
+                    "Per-body mass values are read from body_inertia[b]['mass']."
+                )
             self.forces_def = parse_force_dict(
                 self.Force,
                 n_bodies=self.joint_system.NBodies,
@@ -290,7 +295,7 @@ class MbdSystem3D:
         else:
             _pos_cache = None
         # Build JAX point evaluator if Initial_Points was supplied.
-        if not self.sym_points and self.Initial_Points:
+        if self.sym_points is not None and self.Initial_Points:
             self.points_func, self._points_spec = make_points_evaluator_mainint(
                 self.sym_points,
                 list(self.points_sym.values()),
@@ -318,6 +323,7 @@ class MbdSystem3D:
                 _pos_cache,
                 _rate_cache,
                 self.NBodies,
+                body_inertia=self.body_inertia,
             )
             # Build JAX force evaluator from the parsed force definitions.
             self.forces_func = make_forces_evaluator_mainint(
@@ -335,6 +341,7 @@ class MbdSystem3D:
                 self._geom_extractor,
                 self.NBodies,
                 body_sym_list=list(self.body_data_sym.values()),
+                body_inertia=self.body_inertia,
             )
         # Build symbolic mass cache and JAX mass evaluator if body_inertia
         # was declared.

@@ -263,25 +263,22 @@ class TestDisplayAndPrint:
         blocks = _build_Bdot_blocks(chain_RPS)
         BlockInspector.display_Bdot_blocks(blocks)   # no crash
 
-    def test_print_B_blocks_via_vt(self, chain_RPS, capsys):
-        """VelocityTransformation3D.print_B_blocks delegates to BlockInspector."""
+    def test_print_B_blocks_via_vt(self, chain_RPS):
+        """format_B_blocks returns text containing block header info."""
         blocks = _build_B_blocks(chain_RPS)
-        VelocityTransformation3D.print_B_blocks(blocks)
-        out = capsys.readouterr().out
-        assert "body=1" in out
+        text = BlockInspector.format_B_blocks(blocks)
+        assert "body=1" in text
 
-    def test_print_Bdot_blocks_via_vt(self, chain_RPS, capsys):
+    def test_print_Bdot_blocks_via_vt(self, chain_RPS):
         blocks = _build_Bdot_blocks(chain_RPS)
-        VelocityTransformation3D.print_Bdot_blocks(blocks)
-        out = capsys.readouterr().out
-        assert "body=1" in out
+        text = BlockInspector.format_Bdot_blocks(blocks)
+        assert "body=1" in text
 
-    def test_print_B_show_matrix_false(self, revolute_1body, capsys):
+    def test_print_B_show_matrix_false(self, revolute_1body):
         blocks = _build_B_blocks(revolute_1body)
-        VelocityTransformation3D.print_B_blocks(blocks, show_matrix=False)
-        out = capsys.readouterr().out
-        assert "block =" not in out
-        assert "d_kj" in out
+        text = BlockInspector.format_B_blocks(blocks, show_matrix=False)
+        assert "block =" not in text
+        assert "d_kj" in text
 
 
 # ---------------------------------------------------------------------------

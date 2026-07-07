@@ -51,8 +51,9 @@ TorsionDamper
     Torque on child:  ``-c * theta_dot``  (dissipative).
 
 Gravity
-    Body-CG force ``m_b * g_vec`` applied to each declared body.  No moment
-    (gravity acts at CG).
+    Body-CG force ``g_app[b-1] * m_b * g_vec`` applied to each declared body.
+    No moment (gravity acts at CG).  Per-body mass is read from
+    ``body_inertia`` passed to the builder.
 """
 
 from __future__ import annotations
@@ -198,6 +199,7 @@ def _point_velocity(
 # ---------------------------------------------------------------------------
 # Per-category builders
 # ---------------------------------------------------------------------------
+
 
 def _build_cg_wrenches(
     forces_def: "ForcesDefinition3D",
@@ -444,11 +446,13 @@ def _build_gravity_wrenches(
     forces_def: "ForcesDefinition3D",
     pos_cache: "KinematicsCache3D",
     NBodies: int,
+    body_inertia: dict = {},
 ) -> List[sym.Matrix]:
     """Assemble per-body wrenches from the gravity definition.
 
     Gravity acts at each body CG, so there is no moment contribution.
-    ``F_gravity(b) = mass(b) * g_vec``.
+    ``F_gravity(b) = g_app[b-1] * mass(b) * g_vec``
+    where ``mass(b)`` is taken from *body_inertia*.
     """
     wrenches = _zeros_wrenches(NBodies)
     gd = forces_def.gravity
@@ -459,10 +463,11 @@ def _build_gravity_wrenches(
     zeros3 = sym.zeros(3, 1)
 
     for b in range(1, NBodies + 1):
-        mass = gd.mass.get(b)
-        if mass is None:
+        mass    = sym.sympify(body_inertia.get(b, {}).get("mass", 0))
+        g_app_b = gd.g_app[b - 1] if b - 1 < len(gd.g_app) else 1.0
+        if mass == 0:
             continue
-        f_grav = mass * g_col          # (3,1) sym.Matrix; mass may be symbolic
+        f_grav = g_app_b * mass * g_col
         wrenches[b - 1] = wrenches[b - 1] + _wrench6(f_grav, zeros3)
 
     return wrenches
@@ -479,6 +484,7 @@ def build_forces_symbolic(
     pos_cache: "KinematicsCache3D",
     rate_cache: Optional["KinematicsRateCache3D"],
     NBodies: int,
+    body_inertia: dict = {},
 ) -> SymbolicForcesCache3D:
     """Build the full symbolic 3D force cache.
 
@@ -502,6 +508,9 @@ def build_forces_symbolic(
         Rate kinematics (needed only for ``TensionDamper`` entries).
     NBodies : int
         Number of bodies (excluding ground).
+    body_inertia : dict, optional
+        Per-body inertia dict ``{body_id: {"mass": ..., "J": ...}}``.  Mass
+        values are used to assemble the gravity wrench.
 
     Returns
     -------
@@ -578,7 +587,7 @@ def build_forces_symbolic(
     # Gravity
     if forces_def.gravity is not None:
         wrench_by_category["Gravity"] = _build_gravity_wrenches(
-            forces_def, pos_cache, NBodies
+            forces_def, pos_cache, NBodies, body_inertia=body_inertia
         )
 
     # --- Total wrench (sum across categories) ----------------------------

@@ -93,21 +93,27 @@ All keys are optional.  Unrecognized keys raise ``ValueError``.
 
 ``"Gravity"`` : dict
     Uniform gravitational field applied at each body CG.
-    Must contain exactly two keys:
+    Must contain ``"g_vec"``.  The optional key ``"g_app"`` controls the
+    fraction of gravity applied to each body.
 
     ``"g_vec"`` — 3-element sequence ``[gx, gy, gz]`` (numeric or SymPy),
     typically ``[0, 0, -9.81]``.
 
-    ``"mass"``  — either a list of body masses (1-indexed, so
-    ``mass[i-1]`` is the mass of body *i*), or a dict
-    ``{body_id: mass}`` mapping 1-based body ids to mass values
-    (numeric or SymPy).
+    ``"g_app"`` — list of ``n_bodies`` floats in ``[0, 1]``, where
+    ``g_app[i-1]`` is the fraction of gravity applied to body *i*.
+    Defaults to ``[1.0, ..., 1.0]`` (full gravity on all bodies) when
+    omitted.
+
+    Per-body mass values are read from ``body_inertia[b]["mass"]`` at
+    construction time.  The gravitational force on body *b* is
+
+        ``F(b) = g_app[b-1] * body_inertia[b]["mass"] * g_vec``
 
     Example::
 
         "Gravity": {
             "g_vec": [0, 0, -9.81],
-            "mass":  {1: m1, 2: m2, 3: m3, 4: m4},
+            "g_app": [1.0, 0.5, 0.0],   # optional; default = [1.0, ...]
         }
 """
 
@@ -252,13 +258,14 @@ class GravityDef:
     ----------
     g_vec : tuple[Any, Any, Any]
         Gravity acceleration vector (gx, gy, gz) in the world frame.
-    mass : dict[int, Any]
-        Map from 1-based body id to mass value (numeric or SymPy).
-        Bodies absent from the dict are assigned zero mass.
+    g_app : tuple[float, ...]
+        Per-body gravity application fraction, one entry per body.
+        ``g_app[b-1]`` is the fraction applied to body *b*; values in
+        ``[0, 1]``.  Length equals ``NBodies``.
     """
 
     g_vec: Tuple[Any, Any, Any]
-    mass:  Dict[int, Any]  # body_id (1-based) → mass
+    g_app: Tuple[float, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -351,8 +358,7 @@ class ForcesDefinition3D:
 
         if self.gravity is not None:
             _scan_vec(self.gravity.g_vec)
-            for mass_val in self.gravity.mass.values():
-                _scan(mass_val)
+            # g_app contains only plain floats; no SymPy symbols to scan
 
         return list(seen)
 
@@ -512,30 +518,36 @@ def parse_force_dict(
         gspec = force_dict["Gravity"]
         if not isinstance(gspec, dict):
             raise ValueError(
-                f"Force['Gravity'] must be a dict with keys 'g_vec' and 'mass'; "
-                f"got {type(gspec).__name__!r}."
+                f"Force['Gravity'] must be a dict; got {type(gspec).__name__!r}."
             )
-        if "g_vec" not in gspec or "mass" not in gspec:
+        _grav_known = frozenset({"g_vec", "g_app"})
+        unknown_grav = set(gspec.keys()) - _grav_known
+        if unknown_grav:
             raise ValueError(
-                "Force['Gravity'] must contain both 'g_vec' and 'mass' keys."
+                f"Force['Gravity'] contains unrecognized key(s): "
+                f"{sorted(unknown_grav)}.  Allowed: {sorted(_grav_known)}."
             )
+        if "g_vec" not in gspec:
+            raise ValueError("Force['Gravity'] must contain 'g_vec'.")
         g_vec = _as3(gspec["g_vec"], "Force['Gravity']['g_vec']")
-        raw_mass = gspec["mass"]
-        if isinstance(raw_mass, dict):
-            mass_map: Dict[int, Any] = {int(k): v for k, v in raw_mass.items()}
-        elif hasattr(raw_mass, "__iter__"):
-            # list/tuple — 0-indexed → body id = index+1
-            mass_map = {i + 1: v for i, v in enumerate(raw_mass)}
+        if "g_app" in gspec:
+            raw_gapp = list(gspec["g_app"])
+            if n_bodies is not None and len(raw_gapp) != n_bodies:
+                raise ValueError(
+                    f"Force['Gravity']['g_app'] must have length {n_bodies} "
+                    f"(one entry per body); got length {len(raw_gapp)}."
+                )
+            for i, v in enumerate(raw_gapp):
+                fv = float(v)
+                if not (0.0 <= fv <= 1.0):
+                    raise ValueError(
+                        f"Force['Gravity']['g_app'][{i}] = {v!r} is outside [0, 1]."
+                    )
+            g_app: Tuple[float, ...] = tuple(float(v) for v in raw_gapp)
         else:
-            raise ValueError(
-                "Force['Gravity']['mass'] must be a dict {body_id: mass} "
-                "or a list [m1, m2, ...]; "
-                f"got {type(raw_mass).__name__!r}."
-            )
-        # Validate body ids against n_bodies
-        for bid in mass_map:
-            _check_body_id(bid, n_bodies, allow_ground=False, label="Force['Gravity']['mass']")
-        fd.gravity = GravityDef(g_vec, mass_map)
+            nb = n_bodies if n_bodies is not None else 0
+            g_app = tuple(1.0 for _ in range(nb))
+        fd.gravity = GravityDef(g_vec, g_app)
     return fd
 
 

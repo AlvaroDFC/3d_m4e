@@ -131,7 +131,7 @@ def test_build_joint_coords_3d_shapes_names_and_slices():
     assert bundle.qd.shape == (sys.total_dof, 1)
 
     assert bundle.names == ["q1_theta", "q1_s", "q2_theta", "q3_phi", "q3_theta", "q3_psi"]
-    assert bundle.names_d == ["qd1_theta", "qd1_sd", "qd2_theta", "qd3_phi", "qd3_theta", "qd3_psi"]
+    assert bundle.names_d == ["qd1_theta", "qd1_s", "qd2_theta", "qd3_wx", "qd3_wy", "qd3_wz"]
 
     assert len(bundle.per_joint) == len(sys.joints) == len(sys.col_slice)
     for i, pj in enumerate(bundle.per_joint):
@@ -143,4 +143,4 @@ def test_build_joint_coords_3d_shapes_names_and_slices():
 
     # Cylindrical ordering must be [theta, s]
     assert bundle.per_joint[0]["names"] == ["q1_theta", "q1_s"]
-    assert bundle.per_joint[0]["names_d"] == ["qd1_theta", "qd1_sd"]
+    assert bundle.per_joint[0]["names_d"] == ["qd1_theta", "qd1_s"]

@@ -135,30 +135,37 @@ blk = blocks[(1, 0)]
 # print(float(forces.spring_potential_energy))
 
 ####### Integration ######################################################
-# Masses: read from example's Force["Gravity"]["mass"] if defined.
-_ex_masses = getattr(ex, 'Force', {}).get('Gravity', {}).get('mass', {})
-# Inertia: read from example's J_body_imm (full 3×3) if defined.
-_ex_J      = getattr(ex, 'J_body_imm', {})
-
-# Rebuild mbd with body_inertia so that eom_func / mass_func are available.
-body_inertia = {
-    b: {
-        'mass': float(_ex_masses.get(b, 1.0)),
-        'J':   np.asarray(_ex_J[b], dtype=float) if b in _ex_J
-               else np.eye(3) * 0.01,
+# body_inertia is now read directly from the example module by from_example().
+# The second MbdSystem3D construction below is only needed if from_example()
+# was called without body_inertia (e.g. legacy examples without that attribute).
+# For example9 and newer examples, body_inertia is already on the module.
+_ex_bi = getattr(ex, 'body_inertia', None)
+if _ex_bi is not None:
+    # Example already provides body_inertia; the first from_example() call
+    # already built the full system — no rebuild needed.
+    pass
+else:
+    # Legacy path: reconstruct body_inertia from separate body_mass / J_body_imm.
+    _ex_masses = getattr(ex, 'body_mass', {})
+    _ex_J      = getattr(ex, 'J_body_imm', {})
+    _ex_bi = {
+        b: {
+            'mass': float(_ex_masses.get(b, 1.0)),
+            'J':   np.asarray(_ex_J[b], dtype=float) if b in _ex_J
+                   else np.eye(3) * 0.01,
+        }
+        for b in range(1, mbd.NBodies + 1)
     }
-    for b in range(1, mbd.NBodies + 1)
-}
-mbd = MbdSystem3D(
-    data=ex.data,
-    body_data_sym=getattr(ex, 'body_data_sym', {}),
-    force_points_sym={**getattr(ex, 'force_points_sym', {}),
-                      **getattr(ex, 'force_sym',        {})},
-    points_sym=getattr(ex, 'points_sym', {}),
-    Initial_Points=getattr(ex, 'Initial_Points', {}),
-    Force=getattr(ex, 'Force', {}),
-    body_inertia=body_inertia,
-)
+    mbd = MbdSystem3D(
+        data=ex.data,
+        body_data_sym=getattr(ex, 'body_data_sym', {}),
+        force_points_sym={**getattr(ex, 'force_points_sym', {}),
+                          **getattr(ex, 'force_sym',        {})},
+        points_sym=getattr(ex, 'points_sym', {}),
+        Initial_Points=getattr(ex, 'Initial_Points', {}),
+        Force=getattr(ex, 'Force', {}),
+        body_inertia=_ex_bi,
+    )
 
 import diffrax as _diffrax
 sol = mbd.integrate(
@@ -244,7 +251,7 @@ _eom_e = (
 
 # ── Body masses ordered by body id ───────────────────────────────────────────
 _masses_e = jnp.array(
-    [body_inertia[b]["mass"] for b in sorted(body_inertia)],
+    [_ex_bi[b]["mass"] for b in sorted(_ex_bi)],
     dtype=jnp.float64,
 )
 

@@ -13,11 +13,11 @@ import numpy as np
 import sympy as sym
 import pytest
 
-from source.multibody_3d.multibody_core.joint_system_3d import JointSystem3D
-from source.multibody_3d.multibody_core.velocity_transformation_3d import (
+from multibody_3d.multibody_core.joint_system_3d import JointSystem3D
+from multibody_3d.multibody_core.velocity_transformation_3d import (
     VelocityTransformation3D,
 )
-from source.multibody_3d.multibody_core._velocity_transformation_helper import _type_code
+from multibody_3d.multibody_core._velocity_transformation_helper import _type_code
 
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")

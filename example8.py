@@ -26,9 +26,9 @@
 #   k, L0 = sym.symbols('k L0', positive=True)
 #   Force = {
 #       'TensionSpring': [(2, 0, 4, 0, k, L0)],
-#       'Gravity':       {'g_vec': [0, 0, -9.81], 'mass': {1: m1}},
+#       'Gravity':       {'g_vec': [0, 0, -9.81]},
 #   }
-#   force_sym = {'k': k, 'L0': L0, 'm1': m1}
+#   force_sym = {'k': k, 'L0': L0}
 # ─────────────────────────────────────────────────────────────────────────────
 
 import sympy as sym

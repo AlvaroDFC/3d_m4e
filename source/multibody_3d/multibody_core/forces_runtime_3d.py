@@ -41,7 +41,7 @@ const_vals layout (per element, in declaration order)
 * ``TensionDamper``: [c] × n_td
 * ``TorsionSpring``: [k, theta_eq] × n_ss
 * ``TorsionDamper``: [c] × n_sd
-* ``Gravity``      : [mass_b1, mass_b2, ...] per declared body
+(Gravity weights are baked at construction time and do not appear in const_vals)
 """
 
 from __future__ import annotations
@@ -64,11 +64,11 @@ if not _JAX_AVAILABLE:
 
 try:
     from .force_definition_3d import ForcesDefinition3D
-    from .points_3d import SymbolicPointsCache3D, PointRecord3D
+    from .points_3d import SymbolicPointsCache3D, PointRecord3D, _make_r_local_fn
     from .joint_coordinate_3d import CoordBundle
 except Exception:  # pragma: no cover
     from force_definition_3d import ForcesDefinition3D
-    from points_3d import SymbolicPointsCache3D, PointRecord3D
+    from points_3d import SymbolicPointsCache3D, PointRecord3D, _make_r_local_fn
     from joint_coordinate_3d import CoordBundle
 
 
@@ -143,15 +143,6 @@ def _make_const_fn(expr: Any, force_sym_list: list, points_sym_list: list):
 
     return fn
 
-
-def _make_vec3_fn(vec: Tuple[Any, Any, Any], force_sym_list: list, points_sym_list: list):
-    """Return ``fn(fp, pp) -> np.ndarray(3,)`` for a 3-component vector."""
-    fns = [_make_const_fn(c, force_sym_list, points_sym_list) for c in vec]
-    def fn(fp, pp, _fns=fns):
-        return np.array([f(fp, pp) for f in _fns], dtype=float)
-    return fn
-
-
 def _get_point_record(
     body_id: int, pt_idx: int, sym_points: SymbolicPointsCache3D, label: str
 ) -> PointRecord3D:
@@ -173,37 +164,9 @@ def _get_point_record(
     return pts[pt_idx]
 
 
-def _make_r_local_fn(
-    r_local_sym: "sym.Matrix",
-    body_sym_list: list,
-    points_sym_list: list,
-):
-    """Return ``fn(bp, pp) -> np.ndarray(3,)`` for a symbolic r_local.
-
-    Lambdified over ``body_sym_list + points_sym_list`` so that r_local
-    expressions that reference body-geometry symbols (e.g. link lengths)
-    are resolved at runtime from the body-params slice.
-    """
-    all_syms = body_sym_list + points_sym_list
-    components = [r_local_sym[i, 0] for i in range(3)]
-    raw = sym.lambdify(all_syms, components, modules="numpy")
-    n_bp = len(body_sym_list)
-    n_pp = len(points_sym_list)
-    def fn(bp, pp, _f=raw, _nbp=n_bp, _npp=n_pp):
-        bp_vals = list(bp[:_nbp]) if _nbp else []
-        pp_vals = list(pp[:_npp]) if _npp else []
-        return np.asarray(_f(*bp_vals, *pp_vals), dtype=float).ravel()
-    return fn
-
-
 # ---------------------------------------------------------------------------
 # Inner JAX assembly (called inside the JIT boundary)
 # ---------------------------------------------------------------------------
-
-def _cross3(a: "jnp.ndarray", b: "jnp.ndarray") -> "jnp.ndarray":
-    """Cross product of two (3,) JAX arrays."""
-    return jnp.cross(a, b)
-
 
 def _wrench6(f3: "jnp.ndarray", m3: "jnp.ndarray") -> "jnp.ndarray":
     """Stack (3,) force + (3,) moment into a (6,) wrench."""
@@ -252,6 +215,7 @@ def make_forces_evaluator_mainint(
     extractor,                # GeometryExtractor
     NBodies: int,
     body_sym_list: list = (),  # ordered list of body_data_sym symbols
+    body_inertia: dict = {},   # per-body {body_id: {"mass": ..., "J": ...}}
 ) -> "callable":
     """Build a persistent JAX force evaluator that accepts ``mainNumVars_int``.
 
@@ -408,19 +372,17 @@ def make_forces_evaluator_mainint(
         _const_fns.append(_make_const_fn(d.c, force_sym_list, points_sym_list))
         cv_cursor += 1
 
-    # Gravity: ordered list of (body_0idx, cv_start)
+    # Gravity: per-body weights baked at construction time (g_app[b-1] * mass[b])
     _grav_g: Optional[Tuple[float, float, float]] = None
-    _grav_meta: List[Tuple[int, int]] = []
+    _grav_weights_list: List[float] = []
     if forces_def.gravity is not None:
         gd = forces_def.gravity
         _grav_g = (float(sym.sympify(gd.g_vec[0])),
                    float(sym.sympify(gd.g_vec[1])),
                    float(sym.sympify(gd.g_vec[2])))
-        for body_id in sorted(gd.mass.keys()):
-            _grav_meta.append((body_id - 1, cv_cursor))
-            _const_fns.append(_make_const_fn(gd.mass[body_id],
-                                             force_sym_list, points_sym_list))
-            cv_cursor += 1
+        for b in range(1, NB + 1):
+            mass_b = float(sym.sympify(body_inertia[b]["mass"]))
+            _grav_weights_list.append(gd.g_app[b - 1] * mass_b)
 
     n_cv = cv_cursor
     n_rl = len(_r_local_fns)
@@ -433,9 +395,11 @@ def make_forces_evaluator_mainint(
         or forces_def.torsion_dampers
     )
 
-    # Capture gravity vector as JAX array for JIT closure
+    # Capture gravity data as JAX arrays for JIT closure
     _g_jax = jnp.array(_grav_g if _grav_g is not None else [0., 0., 0.],
                         dtype=jnp.float64)
+    _grav_weights_jax = jnp.array(_grav_weights_list if _grav_weights_list else [0.],
+                                   dtype=jnp.float64)
 
     # ── Build the inner JAX assembly function (traceable) ─────────────────
     def _assemble(q_int, qd, r_locals, const_vals, A_abs, r_abs, U,
@@ -463,7 +427,7 @@ def make_forces_evaluator_mainint(
             f3      = const_vals[cv0:cv0 + 3]
             m_free  = const_vals[cv0 + 3:cv0 + 6]
             _, rho  = _point_rabs_rho(b0 + 1, rl_i, r_locals, A_abs, r_abs)
-            m_r     = _cross3(rho, f3)
+            m_r     = jnp.cross(rho, f3)
             w_pbd   = w_pbd.at[b0].add(_wrench6(f3, m_r + m_free))
 
         # TensionSpring
@@ -480,11 +444,11 @@ def make_forces_evaluator_mainint(
             f_on_b  = -F_mag * e
             if ba > 0:
                 b0a = ba - 1
-                m_a = _cross3(rho_a, f_on_a)
+                m_a = jnp.cross(rho_a, f_on_a)
                 w_ts = w_ts.at[b0a].add(_wrench6(f_on_a, m_a))
             if bb > 0:
                 b0b = bb - 1
-                m_b = _cross3(rho_b, f_on_b)
+                m_b = jnp.cross(rho_b, f_on_b)
                 w_ts = w_ts.at[b0b].add(_wrench6(f_on_b, m_b))
             pe = pe + jnp.array(0.5, dtype=jnp.float64) * k_val * (L - L0_val) ** 2
 
@@ -502,24 +466,24 @@ def make_forces_evaluator_mainint(
             else:
                 v_cg_a  = v_abs[ba].ravel()
                 om_a    = omega_abs[ba].ravel()
-                v_pa    = v_cg_a + _cross3(om_a, rho_a)
+                v_pa    = v_cg_a + jnp.cross(om_a, rho_a)
             if bb == 0:
                 v_pb = z3
             else:
                 v_cg_b  = v_abs[bb].ravel()
                 om_b    = omega_abs[bb].ravel()
-                v_pb    = v_cg_b + _cross3(om_b, rho_b)
+                v_pb    = v_cg_b + jnp.cross(om_b, rho_b)
             L_dot   = jnp.dot(e, v_pb - v_pa)
             F_mag   = c_val * L_dot
             f_on_a  =  F_mag * e
             f_on_b  = -F_mag * e
             if ba > 0:
                 b0a = ba - 1
-                m_a = _cross3(rho_a, f_on_a)
+                m_a = jnp.cross(rho_a, f_on_a)
                 w_td = w_td.at[b0a].add(_wrench6(f_on_a, m_a))
             if bb > 0:
                 b0b = bb - 1
-                m_b = _cross3(rho_b, f_on_b)
+                m_b = jnp.cross(rho_b, f_on_b)
                 w_td = w_td.at[b0b].add(_wrench6(f_on_b, m_b))
 
         # TorsionSpring
@@ -547,9 +511,8 @@ def make_forces_evaluator_mainint(
                 w_sd = w_sd.at[parent - 1].add(_wrench6(z3, -M_child))
 
         # Gravity
-        for b0, cv0 in _grav_meta:
-            mass  = const_vals[cv0]
-            f_g   = mass * _g_jax
+        for b0 in range(len(_grav_weights_list)):
+            f_g    = _grav_weights_jax[b0] * _g_jax
             w_grav = w_grav.at[b0].add(_wrench6(f_g, z3))
 
         total = w_cg + w_pbd + w_ts + w_td + w_ss + w_sd + w_grav
@@ -570,7 +533,7 @@ def make_forces_evaluator_mainint(
     def _eval_r_locals(bp, pp):
         if not _r_local_fns:
             return np.zeros((0, 3), dtype=float)
-        return np.stack([fn(bp, pp) for fn in _r_local_fns])   # (n_rl, 3)
+        return np.stack([fn(*bp, *pp) for fn in _r_local_fns])   # (n_rl, 3)
 
     # ── Build JIT kernel (constant vs. parameterized geometry) ────────────
     if not extractor.has_dynamic:

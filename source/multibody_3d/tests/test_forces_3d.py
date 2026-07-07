@@ -47,7 +47,8 @@ import jax.numpy as jnp  # noqa: E402
 #   CG           body 1 ← [Fx, 0, 0] force + [0, 0, Mz] moment
 #   PointsBD     body 2, pt 0 ← [0, Fy, 0] force  (induces CG moment)
 #   TorsionSpring joint 0 (body 1 child), stiffness k_t, eq = 0
-#   Gravity      body 1 mass m1, body 2 mass m2, g = [0, -9.81, 0]
+#   Gravity      g_vec = [0, -9.81, 0]; body 1 mass 1.0, body 2 mass 1.0 (from body_inertia)
+#   TorsionSpring joint 0, stiffness k_t, eq = 0
 #
 # Note: TensionSpring between GR[0] and BD[2][0] is tested in a separate
 # fixture to keep this one minimal.
@@ -65,7 +66,6 @@ def mbd_force_rr():
     """2-body RR chain with CG, PointsBD, TorsionSpring, and Gravity forces."""
     Fx, Fy, Mz = sym.symbols("Fx Fy Mz", real=True)
     k_t         = sym.Symbol("k_t", positive=True)
-    m1, m2      = sym.symbols("m1 m2", positive=True)
     a, b        = sym.symbols("a b", real=True)
 
     data = {
@@ -78,7 +78,7 @@ def mbd_force_rr():
         "axis_u1": [None, None],
         "axis_u2": [None, None],
     }
-    force_sym = {"Fx": Fx, "Fy": Fy, "Mz": Mz, "k_t": k_t, "m1": m1, "m2": m2}
+    force_sym  = {"Fx": Fx, "Fy": Fy, "Mz": Mz, "k_t": k_t}
     points_sym = {"a": a, "b": b}
     Initial_Points = {
         "GR": [[0.0, 0.0, 0.0]],
@@ -91,7 +91,12 @@ def mbd_force_rr():
         "CG": {1: {"force": [Fx, 0, 0], "moment": [0, 0, Mz]}},
         "PointsBD": [(2, 0, [0, Fy, 0])],
         "TorsionSpring": [(0, k_t, 0.0)],
-        "Gravity": {"g_vec": [0.0, -9.81, 0.0], "mass": {1: m1, 2: m2}},
+        "Gravity": {"g_vec": [0.0, -9.81, 0.0]},
+    }
+    _I_small = [[0.01, 0., 0.], [0., 0.01, 0.], [0., 0., 0.01]]
+    body_inertia = {
+        1: {"mass": 1.0, "J": _I_small},
+        2: {"mass": 1.0, "J": _I_small},
     }
     return MbdSystem3D(
         data=data,
@@ -99,17 +104,18 @@ def mbd_force_rr():
         points_sym=points_sym,
         Initial_Points=Initial_Points,
         Force=Force,
-    ), dict(Fx=Fx, Fy=Fy, Mz=Mz, k_t=k_t, m1=m1, m2=m2, a=a, b=b)
+        body_inertia=body_inertia,
+    ), dict(Fx=Fx, Fy=Fy, Mz=Mz, k_t=k_t, a=a, b=b)
 
 
 def _mnv_rr(mbd, q1, q2, qd1, qd2,
-            Fx=0.0, Fy=0.0, Mz=0.0, k_t=1.0, m1=1.0, m2=1.0,
+            Fx=0.0, Fy=0.0, Mz=0.0, k_t=1.0,
             a=1.0, b=1.0):
     """Assemble mainNumVars for the 2-body RR fixture (theta, theta, dtheta, dtheta, …)."""
     q_user = [q1, q2]
     qd     = [qd1, qd2]
-    fp     = [Fx, Fy, Mz, k_t, m1, m2]   # matches force_sym insertion order
-    pp     = [a, b]                         # matches points_sym insertion order
+    fp     = [Fx, Fy, Mz, k_t]   # matches force_sym insertion order
+    pp     = [a, b]               # matches points_sym insertion order
     return np.array(q_user + qd + fp + pp, dtype=float)
 
 
@@ -134,8 +140,7 @@ class TestForceSymbolsInVectors:
         mbd, syms = mbd_force_rr
         slc = mbd._slc_force
         syms_at_slice = list(mbd.mainSymVars)[slc]
-        expected = [syms["Fx"], syms["Fy"], syms["Mz"],
-                    syms["k_t"], syms["m1"], syms["m2"]]
+        expected = [syms["Fx"], syms["Fy"], syms["Mz"], syms["k_t"]]
         assert syms_at_slice == expected
 
     def test_point_params_order_preserved(self, mbd_force_rr):
@@ -149,7 +154,7 @@ class TestForceSymbolsInVectors:
         mbd, _ = mbd_force_rr
         expected = (mbd.total_user_dof   # q1, q2
                     + mbd.total_dof       # qd1, qd2
-                    + 6                   # Fx, Fy, Mz, k_t, m1, m2
+                    + 4                   # Fx, Fy, Mz, k_t
                     + 2)                  # a, b
         assert len(mbd.mainSymVars) == expected
 
@@ -201,11 +206,13 @@ class TestSymbolicOpacity:
         assert pe is not None
         assert syms["k_t"] in pe.free_symbols
 
-    def test_gravity_wrench_contains_mass_symbols(self, mbd_force_rr):
+    def test_gravity_wrench_has_correct_force(self, mbd_force_rr):
+        """Gravity wrench y-components equal mass*g_y (mass=1.0 from body_inertia)."""
         mbd, syms = mbd_force_rr
         grav_cat = mbd.sym_forces.wrench_by_category["Gravity"]
-        assert syms["m1"] in grav_cat[0].free_symbols
-        assert syms["m2"] in grav_cat[1].free_symbols
+        # mass=1.0, g_app=1.0, g_vec=[0, -9.81, 0] → F_y = -9.81
+        assert float(grav_cat[0][1, 0]) == pytest.approx(-9.81)
+        assert float(grav_cat[1][1, 0]) == pytest.approx(-9.81)
 
     def test_points_bd_wrench_contains_Fy(self, mbd_force_rr):
         mbd, syms = mbd_force_rr
@@ -286,7 +293,7 @@ class TestNumericEvaluation:
 
     def test_evaluate_total_wrench_matches_total(self, mbd_force_rr):
         mbd, _ = mbd_force_rr
-        mnv = _mnv_rr(mbd, 0.1, -0.2, 0.3, 0.4, Fx=2.0, Fy=3.0, m1=5.0)
+        mnv = _mnv_rr(mbd, 0.1, -0.2, 0.3, 0.4, Fx=2.0, Fy=3.0)
         total_via_result = mbd.evaluate_forces(mnv).total
         total_via_method = mbd.evaluate_total_wrench(mnv)
         np.testing.assert_allclose(
@@ -406,26 +413,24 @@ class TestTorsionSpring:
 class TestGravity:
 
     def test_gravity_Fy_on_body1(self, mbd_force_rr):
-        """Body 1 gravity force = m1 * g_y in the y-column."""
+        """Body 1 gravity force = mass(1) * g_y  (mass=1.0 from body_inertia)."""
         mbd, _ = mbd_force_rr
-        m1_val = 5.0
-        mnv    = _mnv_rr(mbd, 0.0, 0.0, 0.0, 0.0, m1=m1_val)
+        mnv    = _mnv_rr(mbd, 0.0, 0.0, 0.0, 0.0)
         result = mbd.evaluate_forces(mnv)
-        expected = m1_val * (-9.81)
+        expected = 1.0 * (-9.81)   # body_inertia mass=1.0, g_app=1.0
         assert float(result.gravity[0, 1]) == pytest.approx(expected, rel=1e-9)
 
     def test_gravity_Fy_on_body2(self, mbd_force_rr):
         mbd, _ = mbd_force_rr
-        m2_val = 3.0
-        mnv    = _mnv_rr(mbd, 0.0, 0.0, 0.0, 0.0, m2=m2_val)
+        mnv    = _mnv_rr(mbd, 0.0, 0.0, 0.0, 0.0)
         result = mbd.evaluate_forces(mnv)
-        expected = m2_val * (-9.81)
+        expected = 1.0 * (-9.81)
         assert float(result.gravity[1, 1]) == pytest.approx(expected, rel=1e-9)
 
     def test_gravity_no_moment(self, mbd_force_rr):
         """Gravity acts at CG → no induced moment."""
         mbd, _ = mbd_force_rr
-        mnv    = _mnv_rr(mbd, 0.0, 0.0, 0.0, 0.0, m1=2.0, m2=3.0)
+        mnv    = _mnv_rr(mbd, 0.0, 0.0, 0.0, 0.0)
         result = mbd.evaluate_forces(mnv)
         for b in range(mbd.NBodies):
             np.testing.assert_allclose(
@@ -520,7 +525,7 @@ class TestTotalForce:
         """total wrench must equal sum of all non-zero category arrays."""
         mbd, _ = mbd_force_rr
         mnv    = _mnv_rr(mbd, 0.2, -0.1, 0.0, 0.0,
-                          Fx=3.0, Fy=2.0, Mz=1.0, k_t=1.5, m1=4.0, m2=2.0)
+                          Fx=3.0, Fy=2.0, Mz=1.0, k_t=1.5)
         result = mbd.evaluate_forces(mnv)
         manual_total = (
             np.asarray(result.cg)
@@ -562,11 +567,31 @@ class TestParametricSensitivity:
                       .torsion_spring[0, 5])
         assert m2_rr == pytest.approx(2.0 * m1_rr, rel=1e-9)
 
-    def test_m1_scales_gravity_force(self, mbd_force_rr):
+    def test_m1_scales_gravity_force(self):
         """Doubling m1 must double body-1 gravity force."""
-        mbd, _ = mbd_force_rr
-        g1 = float(mbd.evaluate_forces(_mnv_rr(mbd, 0, 0, 0, 0, m1=3.0)).gravity[0, 1])
-        g2 = float(mbd.evaluate_forces(_mnv_rr(mbd, 0, 0, 0, 0, m1=6.0)).gravity[0, 1])
+        data = {
+            "NBodies": 2,
+            "joints": [(0, 1), (1, 2)],
+            "types": ["R", "R"],
+            "parent_cg_to_joint": [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            "joint_to_child_cg":  [[-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]],
+            "axis_u": [[0, 0, 1], [0, 0, 1]],
+            "axis_u1": [None, None],
+            "axis_u2": [None, None],
+        }
+        _I = [[0.01, 0., 0.], [0., 0.01, 0.], [0., 0., 0.01]]
+        Force = {"Gravity": {"g_vec": [0.0, -9.81, 0.0]}}
+        mbd1 = MbdSystem3D(
+            data=data, Force=Force,
+            body_inertia={1: {"mass": 3.0, "J": _I}, 2: {"mass": 1.0, "J": _I}},
+        )
+        mbd2 = MbdSystem3D(
+            data=data, Force=Force,
+            body_inertia={1: {"mass": 6.0, "J": _I}, 2: {"mass": 1.0, "J": _I}},
+        )
+        mnv = np.zeros(4)   # [q1, q2, qd1, qd2]
+        g1 = float(mbd1.evaluate_forces(mnv).gravity[0, 1])
+        g2 = float(mbd2.evaluate_forces(mnv).gravity[0, 1])
         assert g2 == pytest.approx(2.0 * g1, rel=1e-9)
 
     def test_Fy_scales_points_bd_force(self, mbd_force_rr):
@@ -579,6 +604,6 @@ class TestParametricSensitivity:
     def test_result_invariant_to_kinematics_changes(self, mbd_force_rr):
         """Force params not affecting kinematics; changing only k_t must not alter gravity."""
         mbd, _ = mbd_force_rr
-        g_low  = np.asarray(mbd.evaluate_forces(_mnv_rr(mbd, 0, 0, 0, 0, k_t=1.0, m1=5.0)).gravity)
-        g_high = np.asarray(mbd.evaluate_forces(_mnv_rr(mbd, 0, 0, 0, 0, k_t=99.0, m1=5.0)).gravity)
+        g_low  = np.asarray(mbd.evaluate_forces(_mnv_rr(mbd, 0, 0, 0, 0, k_t=1.0)).gravity)
+        g_high = np.asarray(mbd.evaluate_forces(_mnv_rr(mbd, 0, 0, 0, 0, k_t=99.0)).gravity)
         np.testing.assert_allclose(g_low, g_high, atol=1e-14)

@@ -14,17 +14,23 @@ data = {
 Force = {
     "Gravity": {
         "g_vec": [0, 0, -9.81],
-        "mass": {1: 1.0, 2: 1.0},
+        "g_app": [1, 1]
     },
 }
 
-# Body-frame principal inertia tensors [kg·m²] — full 3×3 to allow non-diagonal entries.
+# Per-body masses [kg] and body-frame inertia tensors [kg·m²].
 # For a uniform rod of mass 1 kg, length 2 m: Ixx=Iyy≈mL²/12=0.333, Izz≈0 (thin rod).
-J_body_imm = {
-    1: [[0.333, 1.,    3.   ],
-        [1.,    0.333, 0.   ],
-        [3.,    0.,    0.01 ]],
-    2: [[0.333, 1.33,    0.33   ],
-        [1.33,    0.333, 0.   ],
-        [0.33,    0.,    0.01 ]],
+body_inertia = {
+    1: {
+        "mass": 1.0,
+        "J": [[0.333, 1.,    3.   ],
+              [1.,    0.333, 0.   ],
+              [3.,    0.,    0.01 ]],
+    },
+    2: {
+        "mass": 1.0,
+        "J": [[0.333, 1.33,  0.33 ],
+              [1.33,  0.333, 0.   ],
+              [0.33,  0.,    0.01 ]],
+    },
 }
