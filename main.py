@@ -47,7 +47,7 @@ mbd.summary_table(precision=3)
 # force_params = np.array([1., 1., 1.])            # Fx1=1, Fy1=1, Fz1=1 (world-frame CG force on body 1)
 # example 9, the double pendulum, has no body params or force params, so mainNumVars is just [q_user, qd].
 q_int_np = np.array([0.0 ,0.0])
-qd_np = np.array([1.0,1.0])
+qd_np = np.array([0.0,0.0])
 q_user_np    = mbd.map_q_int_to_q_user(q_int_np)
 # mainNumVars  = np.concatenate([q_user_np, qd_np, body_params, force_params, points_params])
 mainNumVars  = np.concatenate([q_user_np, qd_np])
@@ -216,8 +216,6 @@ plt.tight_layout()
 plt.show()
 
 ####### Kinetic and potential energy over time ##################################
-import jax.numpy as jnp
-
 energy  = mbd.compute_energy(sol, mainNumVars)
 KE_arr, PE_arr, E_total  = energy.KE, energy.PE, energy.E_total
 KE_body, PE_body         = energy.KE_body, energy.PE_body
@@ -260,40 +258,10 @@ plt.tight_layout()
 plt.show()
 
 # ── Per-body linear and angular velocities ───────────────────────────────────
-# Constant parameter blocks + frozen eom evaluator (kinematics only; reused
-# below, not part of the energy postprocessing above).
-_arr_nv = mbd._validate_mainNumVars_shape(mainNumVars)
-_mint0  = mbd._build_mainNumVars_int(_arr_nv)
-_bp_np  = np.array(_mint0[mbd._slc_body_int],   dtype=float)
-_fp_np  = np.array(_mint0[mbd._slc_force_int],  dtype=float)
-_pp_np  = np.array(_mint0[mbd._slc_points_int], dtype=float)
-_eom_e  = (
-    mbd.eom_func.freeze(_bp_np)
-    if hasattr(mbd.eom_func, "freeze")
-    else mbd.eom_func
-)
-_n_qi_e = mbd.total_cfg_dof
-_NB_e   = mbd.NBodies
-_cb_e   = jnp.asarray(_bp_np, dtype=jnp.float64)
-_cf_e   = jnp.asarray(_fp_np, dtype=jnp.float64)
-_cp_e   = jnp.asarray(_pp_np, dtype=jnp.float64)
-
-@jax.jit
-def _body_velocities(y):
-    """Returns v_lin (NB,3) and v_ang (NB,3) for each body."""
-    q_int     = y[:_n_qi_e]
-    qd        = y[_n_qi_e:]
-    mainint_y = jnp.concatenate([q_int, qd, _cb_e, _cf_e, _cp_e])
-    B         = _eom_e(mainint_y).B   # (6*NB, total_dof)
-    v_lin = jnp.stack([B[6*b:6*b+3, :] @ qd for b in range(_NB_e)])  # (NB, 3)
-    v_ang = jnp.stack([B[6*b+3:6*b+6, :] @ qd for b in range(_NB_e)])  # (NB, 3)
-    return v_lin, v_ang
-
-v_lin_all, v_ang_all = jax.vmap(_body_velocities)(
-    jnp.asarray(sol.ys, dtype=jnp.float64)
-)
-v_lin_all = np.array(v_lin_all)   # (n_steps, NB, 3)
-v_ang_all = np.array(v_ang_all)   # (n_steps, NB, 3)
+kin = mbd.compute_kinematics(sol, mainNumVars)
+v_lin_all = kin.v_cg      # (n_steps, NB, 3)
+v_ang_all = kin.omega_cg  # (n_steps, NB, 3)
+_NB_e = mbd.NBodies
 
 fig_v, axes_v = plt.subplots(_NB_e, 2, figsize=(12, 4 * _NB_e), sharex=True)
 if _NB_e == 1:
@@ -316,6 +284,33 @@ for b in range(_NB_e):
     ax_ang.grid(True)
 
 for ax in axes_v[-1, :]:
+    ax.set_xlabel("Time [s]")
+
+plt.tight_layout()
+plt.show()
+
+# ── CG position and orientation trajectories ─────────────────────────────────
+fig_p, axes_p = plt.subplots(_NB_e, 2, figsize=(12, 4 * _NB_e), sharex=True)
+if _NB_e == 1:
+    axes_p = axes_p[np.newaxis, :]
+
+euler_labels = ["roll", "pitch", "yaw"]
+for b in range(_NB_e):
+    ax_r = axes_p[b, 0]
+    ax_o = axes_p[b, 1]
+    for k in range(3):
+        ax_r.plot(ts, kin.r_cg[:, b, k], label=xyz[k])
+        ax_o.plot(ts, kin.euler_cg[:, b, k], label=euler_labels[k])
+    ax_r.set_title(f"Body {b + 1} – CG position (world frame)")
+    ax_o.set_title(f"Body {b + 1} – CG orientation (intrinsic Z-Y-X)")
+    ax_r.set_ylabel("m")
+    ax_o.set_ylabel("rad")
+    ax_r.legend()
+    ax_o.legend()
+    ax_r.grid(True)
+    ax_o.grid(True)
+
+for ax in axes_p[-1, :]:
     ax.set_xlabel("Time [s]")
 
 plt.tight_layout()

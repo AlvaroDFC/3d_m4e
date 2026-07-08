@@ -63,11 +63,11 @@ if not _JAX_AVAILABLE:
     raise ImportError("JAX is required for forces_runtime_3d.")
 
 try:
-    from .force_definition_3d import ForcesDefinition3D
+    from .force_definition_3d import ForcesDefinition3D, is_time_symbol
     from .points_3d import SymbolicPointsCache3D, PointRecord3D, _make_r_local_fn
     from .joint_coordinate_3d import CoordBundle
 except Exception:  # pragma: no cover
-    from force_definition_3d import ForcesDefinition3D
+    from force_definition_3d import ForcesDefinition3D, is_time_symbol
     from points_3d import SymbolicPointsCache3D, PointRecord3D, _make_r_local_fn
     from joint_coordinate_3d import CoordBundle
 
@@ -140,6 +140,44 @@ def _make_const_fn(expr: Any, force_sym_list: list, points_sym_list: list):
         fp_vals = list(fp[:_nfp]) if _nfp else []
         pp_vals = list(pp[:_npp]) if _npp else []
         return float(_f(*fp_vals, *pp_vals))
+
+    return fn
+
+
+def _make_const_fn_jax(expr: Any, t_sym: sym.Symbol, force_sym_list: list, points_sym_list: list):
+    """Return ``fn(t, fp_jax, pp_jax) -> jnp scalar`` for a time-dependent constitutive expression.
+
+    Used instead of :func:`_make_const_fn` when *expr* references a symbol
+    named ``"t"`` (see ``force_definition_3d.is_time_symbol``).  Lambdified
+    with ``modules="jax"`` so the returned function is safe to call with a
+    traced ``t`` inside a ``@jax.jit`` boundary — unlike the numpy path,
+    this is evaluated **inside** the kernel at every call, not baked once
+    at freeze time.
+
+    Parameters
+    ----------
+    expr : sympy expr containing *t_sym*
+    t_sym : sym.Symbol
+        The actual time-symbol instance found in *expr* (matched by name,
+        not necessarily identical to ``force_definition_3d.T_SYM`` — a
+        user-created ``sym.Symbol("t", real=True)`` is a distinct object
+        with the same name and must be substituted as-is).
+    force_sym_list : list[sym.Symbol]
+    points_sym_list : list[sym.Symbol]
+
+    Returns
+    -------
+    callable
+        ``fn(t, fp_jax, pp_jax) -> jnp.ndarray`` (scalar).
+    """
+    e = sym.sympify(expr)
+    all_syms = [t_sym] + list(force_sym_list) + list(points_sym_list)
+    raw = sym.lambdify(all_syms, e, modules="jax")
+
+    def fn(t, fp_jax, pp_jax, _f=raw, _nfp=len(force_sym_list), _npp=len(points_sym_list)):
+        fp_vals = [fp_jax[i] for i in range(_nfp)] if _nfp else []
+        pp_vals = [pp_jax[i] for i in range(_npp)] if _npp else []
+        return _f(t, *fp_vals, *pp_vals)
 
     return fn
 
@@ -275,10 +313,37 @@ def make_forces_evaluator_mainint(
     pp_start  = slc_points_int.start; n_pp = slc_points_int.stop - slc_points_int.start
 
     # ── Build-time data collection ───────────────────────────────────────
-    _const_fns: List       = []   # fn(fp, pp) -> float
+    _const_fns: List       = []   # fn(fp, pp) -> float  (static slots only)
+    _dynamic_const_fns: List[Tuple[int, Any]] = []  # (cv_index, fn(t, fp_jax, pp_jax))
     _r_local_fns: List     = []   # fn(*pp_vals) -> np.ndarray(3,)
     _r_local_body_ids: List = []  # int: body_id for each r_local entry (0 = ground)
     cv_cursor = 0                 # current const_vals cursor
+
+    def _register_const(expr: Any) -> None:
+        """Append one constitutive scalar's slot to ``_const_fns``.
+
+        Splits static (no symbol named ``"t"``) vs. time-dependent
+        expressions: a static expression is lambdified once via
+        :func:`_make_const_fn` (numpy, baked at freeze time); a
+        time-dependent one gets a zero placeholder in the static array plus
+        an entry in ``_dynamic_const_fns`` that is re-evaluated from the
+        traced ``t`` inside the JIT kernel every call (see
+        ``_finalize_const_vals``).  Detection is name-based (see
+        ``force_definition_3d.is_time_symbol``), not object-identity-based,
+        so a user-created ``sym.Symbol("t", real=True)`` is recognized even
+        though it is not the same SymPy object as
+        ``force_definition_3d.T_SYM``.
+        """
+        e = sym.sympify(expr)
+        time_syms = [s for s in e.free_symbols if is_time_symbol(s)]
+        if time_syms:
+            idx = len(_const_fns)
+            _const_fns.append(_make_const_fn(0.0, force_sym_list, points_sym_list))
+            _dynamic_const_fns.append(
+                (idx, _make_const_fn_jax(e, time_syms[0], force_sym_list, points_sym_list))
+            )
+        else:
+            _const_fns.append(_make_const_fn(e, force_sym_list, points_sym_list))
 
     # — Per-category static metadata —
     # CG forces
@@ -286,7 +351,7 @@ def make_forces_evaluator_mainint(
     for d in forces_def.cg_forces:
         _cg_meta.append((d.body_id - 1, cv_cursor))
         for c in list(d.force_vec) + list(d.moment_vec):
-            _const_fns.append(_make_const_fn(c, force_sym_list, points_sym_list))
+            _register_const(c)
         cv_cursor += 6
 
     # PointsBD forces
@@ -299,7 +364,7 @@ def make_forces_evaluator_mainint(
         _r_local_body_ids.append(d.body_id)
         _pbd_meta.append((d.body_id - 1, cv_cursor, rl_idx))
         for c in list(d.force_vec) + list(d.moment_vec):
-            _const_fns.append(_make_const_fn(c, force_sym_list, points_sym_list))
+            _register_const(c)
         cv_cursor += 6
 
     # TensionSpring
@@ -319,8 +384,8 @@ def make_forces_evaluator_mainint(
         _r_local_body_ids.append(d.body_id_b)
 
         _ts_meta.append((d.body_id_a, d.body_id_b, rl_a, rl_b, cv_cursor))
-        _const_fns.append(_make_const_fn(d.k,  force_sym_list, points_sym_list))
-        _const_fns.append(_make_const_fn(d.L0, force_sym_list, points_sym_list))
+        _register_const(d.k)
+        _register_const(d.L0)
         cv_cursor += 2
 
     # TensionDamper
@@ -339,7 +404,7 @@ def make_forces_evaluator_mainint(
         _r_local_body_ids.append(d.body_id_b)
 
         _td_meta.append((d.body_id_a, d.body_id_b, rl_a, rl_b, cv_cursor))
-        _const_fns.append(_make_const_fn(d.c, force_sym_list, points_sym_list))
+        _register_const(d.c)
         cv_cursor += 1
 
     # TorsionSpring: (child, parent, j_idx, q_col, qd_col, cv_start)
@@ -354,8 +419,8 @@ def make_forces_evaluator_mainint(
             pj["speed_slice"].start,  # index into qd for this joint speed (unused in spring)
             cv_cursor,
         ))
-        _const_fns.append(_make_const_fn(d.k,        force_sym_list, points_sym_list))
-        _const_fns.append(_make_const_fn(d.theta_eq, force_sym_list, points_sym_list))
+        _register_const(d.k)
+        _register_const(d.theta_eq)
         cv_cursor += 2
 
     # TorsionDamper: (child, parent, j_idx, qd_col, cv_start)
@@ -369,7 +434,7 @@ def make_forces_evaluator_mainint(
             pj["speed_slice"].start,
             cv_cursor,
         ))
-        _const_fns.append(_make_const_fn(d.c, force_sym_list, points_sym_list))
+        _register_const(d.c)
         cv_cursor += 1
 
     # Gravity: per-body weights baked at construction time (g_app[b-1] * mass[b])
@@ -400,7 +465,21 @@ def make_forces_evaluator_mainint(
                         dtype=jnp.float64)
     _grav_weights_jax = jnp.array(_grav_weights_list if _grav_weights_list else [0.],
                                    dtype=jnp.float64)
+    def _finalize_const_vals(t, const_vals_static, fp_jax, pp_jax):
+        """Scatter time-dependent constitutive values into const_vals.
 
+        Pure JAX, called inside the JIT boundary with the traced ``t``.
+        A no-op (returns *const_vals_static* unchanged) when the force
+        definition has no time-dependent scalars — the Python-level
+        ``if not _dynamic_const_fns`` check is resolved once at trace time,
+        so static-only systems pay no runtime cost for this feature.
+        """
+        if not _dynamic_const_fns:
+            return const_vals_static
+        cv = const_vals_static
+        for idx, jfn in _dynamic_const_fns:
+            cv = cv.at[idx].set(jfn(t, fp_jax, pp_jax))
+        return cv
     # ── Build the inner JAX assembly function (traceable) ─────────────────
     def _assemble(q_int, qd, r_locals, const_vals, A_abs, r_abs, U,
                   omega_abs, v_abs):
@@ -546,7 +625,8 @@ def make_forces_evaluator_mainint(
 
         if _needs_cache:
             @jax.jit
-            def _jit_forces(q_int, qd, r_locals, const_vals):
+            def _jit_forces(q_int, qd, r_locals, const_vals, t, fp_jax, pp_jax):
+                const_vals = _finalize_const_vals(t, const_vals, fp_jax, pp_jax)
                 A_abs, r_abs, rJ, U, _ = build_cache_jax(q_int, **cache_kw)
                 if _needs_rate:
                     omega_abs, v_abs, _, _ = build_rate_cache_jax(
@@ -561,11 +641,12 @@ def make_forces_evaluator_mainint(
         else:
             # CG-only and/or Gravity — no kinematics needed
             @jax.jit
-            def _jit_forces(q_int, qd, r_locals, const_vals):
+            def _jit_forces(q_int, qd, r_locals, const_vals, t, fp_jax, pp_jax):
+                const_vals = _finalize_const_vals(t, const_vals, fp_jax, pp_jax)
                 return _assemble(q_int, qd, r_locals, const_vals,
                                  None, None, None, None, None)
 
-        def _evaluate(mainNumVars_int):
+        def _evaluate(mainNumVars_int, t=0.0):
             v   = np.asarray(mainNumVars_int, dtype=float)
             q   = jnp.asarray(v[qi_start:qi_start + n_qi], dtype=jnp.float64)
             qd  = jnp.asarray(v[qd_start:qd_start + n_qd], dtype=jnp.float64)
@@ -574,7 +655,9 @@ def make_forces_evaluator_mainint(
             bp  = v[bp_start:bp_start + n_bp]
             cv  = jnp.asarray(_eval_const_vals(fp, pp), dtype=jnp.float64)
             rl  = jnp.asarray(_eval_r_locals(bp, pp), dtype=jnp.float64)
-            return _jit_forces(q, qd, rl, cv)
+            fp_jax = jnp.asarray(fp, dtype=jnp.float64)
+            pp_jax = jnp.asarray(pp, dtype=jnp.float64)
+            return _jit_forces(q, qd, rl, cv, jnp.asarray(t, dtype=jnp.float64), fp_jax, pp_jax)
 
         def _freeze(body_params_np, force_params_np, points_params_np):
             """Return a ``@jax.jit`` forces evaluator with all constant params frozen."""
@@ -583,13 +666,16 @@ def make_forces_evaluator_mainint(
             pp = np.asarray(points_params_np, dtype=float)
             _cv_f = jnp.asarray(_eval_const_vals(fp, pp), dtype=jnp.float64)
             _rl_f = jnp.asarray(_eval_r_locals(bp, pp),   dtype=jnp.float64)
+            _fp_jax_f = jnp.asarray(fp, dtype=jnp.float64)
+            _pp_jax_f = jnp.asarray(pp, dtype=jnp.float64)
 
             @jax.jit
-            def _frozen(mainNumVars_int):
+            def _frozen(mainNumVars_int, t=0.0):
                 v     = jnp.asarray(mainNumVars_int, dtype=jnp.float64)
                 q_int = v[qi_start: qi_start + n_qi]
                 qd    = v[qd_start: qd_start + n_qd]
-                return _jit_forces(q_int, qd, _rl_f, _cv_f)
+                return _jit_forces(q_int, qd, _rl_f, _cv_f,
+                                   jnp.asarray(t, dtype=jnp.float64), _fp_jax_f, _pp_jax_f)
 
             return _frozen
 
@@ -605,7 +691,8 @@ def make_forces_evaluator_mainint(
 
         if _needs_cache:
             @jax.jit
-            def _jit_forces(q_int, qd, r_locals, const_vals, p2j, j2c, u, u1, u2):
+            def _jit_forces(q_int, qd, r_locals, const_vals, t, fp_jax, pp_jax, p2j, j2c, u, u1, u2):
+                const_vals = _finalize_const_vals(t, const_vals, fp_jax, pp_jax)
                 A_abs, r_abs, rJ, U, _ = build_cache_jax(
                     q_int, p2j=p2j, j2c=j2c, u=u, u1=u1, u2=u2, **cache_topo,
                 )
@@ -621,11 +708,12 @@ def make_forces_evaluator_mainint(
                                  A_abs, r_abs, U, omega_abs, v_abs)
         else:
             @jax.jit
-            def _jit_forces(q_int, qd, r_locals, const_vals, p2j, j2c, u, u1, u2):
+            def _jit_forces(q_int, qd, r_locals, const_vals, t, fp_jax, pp_jax, p2j, j2c, u, u1, u2):
+                const_vals = _finalize_const_vals(t, const_vals, fp_jax, pp_jax)
                 return _assemble(q_int, qd, r_locals, const_vals,
                                  None, None, None, None, None)
 
-        def _evaluate(mainNumVars_int):
+        def _evaluate(mainNumVars_int, t=0.0):
             v   = np.asarray(mainNumVars_int, dtype=float)
             q   = jnp.asarray(v[qi_start:qi_start + n_qi], dtype=jnp.float64)
             qd  = jnp.asarray(v[qd_start:qd_start + n_qd], dtype=jnp.float64)
@@ -635,7 +723,10 @@ def make_forces_evaluator_mainint(
             geom = extractor.evaluate(bp)
             cv  = jnp.asarray(_eval_const_vals(fp, pp), dtype=jnp.float64)
             rl  = jnp.asarray(_eval_r_locals(bp, pp), dtype=jnp.float64)
-            return _jit_forces(q, qd, rl, cv, *_np_geom_to_jax(*geom))
+            fp_jax = jnp.asarray(fp, dtype=jnp.float64)
+            pp_jax = jnp.asarray(pp, dtype=jnp.float64)
+            return _jit_forces(q, qd, rl, cv, jnp.asarray(t, dtype=jnp.float64), fp_jax, pp_jax,
+                               *_np_geom_to_jax(*geom))
 
         def _freeze(body_params_np, force_params_np, points_params_np):
             """Return a ``@jax.jit`` forces evaluator with all constant params frozen."""
@@ -645,14 +736,18 @@ def make_forces_evaluator_mainint(
             geom = extractor.evaluate(bp)
             _cv_f = jnp.asarray(_eval_const_vals(fp, pp), dtype=jnp.float64)
             _rl_f = jnp.asarray(_eval_r_locals(bp, pp),   dtype=jnp.float64)
+            _fp_jax_f = jnp.asarray(fp, dtype=jnp.float64)
+            _pp_jax_f = jnp.asarray(pp, dtype=jnp.float64)
             _p2j_f, _j2c_f, _u_f, _u1_f, _u2_f = _np_geom_to_jax(*geom)
 
             @jax.jit
-            def _frozen(mainNumVars_int):
+            def _frozen(mainNumVars_int, t=0.0):
                 v     = jnp.asarray(mainNumVars_int, dtype=jnp.float64)
                 q_int = v[qi_start: qi_start + n_qi]
                 qd    = v[qd_start: qd_start + n_qd]
-                return _jit_forces(q_int, qd, _rl_f, _cv_f, _p2j_f, _j2c_f, _u_f, _u1_f, _u2_f)
+                return _jit_forces(q_int, qd, _rl_f, _cv_f,
+                                   jnp.asarray(t, dtype=jnp.float64), _fp_jax_f, _pp_jax_f,
+                                   _p2j_f, _j2c_f, _u_f, _u1_f, _u2_f)
 
             return _frozen
 

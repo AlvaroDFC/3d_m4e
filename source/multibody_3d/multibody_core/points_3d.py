@@ -464,6 +464,53 @@ def _make_r_local_fn(r_local_sym: "sym.Matrix", body_sym_list: list, points_sym_
     return fn
 
 
+def _flatten_body_points(
+    sym_points: SymbolicPointsCache3D,
+    body_sym_list: list,
+    points_sym_list: list,
+) -> "tuple[List[int], List[Any], Dict[int, slice]]":
+    """Flatten declared body-attached points into parallel lists.
+
+    Order: ``body_id`` ASC, then ``point_idx`` ASC within each body — the
+    canonical ordering shared by every consumer of
+    ``SymbolicPointsCache3D.body_points`` (points runtime evaluator,
+    kinematics postprocessing, ...).
+
+    Parameters
+    ----------
+    sym_points : SymbolicPointsCache3D
+    body_sym_list : list[sym.Symbol]
+        Ordered body-geometry symbols (see :func:`_make_r_local_fn`).
+    points_sym_list : list[sym.Symbol]
+        Ordered point-parameter symbols.
+
+    Returns
+    -------
+    body_ids_flat : list[int]
+        Owning body id (1-based) for each flattened point row.
+    r_local_fns : list[callable]
+        Lambdified ``r_local`` functions (see :func:`_make_r_local_fn`),
+        one per row, in the same order as *body_ids_flat*.
+    pt_body_slices : dict[int, slice]
+        Row-range slice into the flattened arrays for each body id.
+    """
+    body_ids_flat:  List[int] = []
+    r_local_fns:    List[Any] = []
+    pt_body_slices: Dict[int, "slice"] = {}
+    cursor = 0
+
+    _body_sym_list = list(body_sym_list)
+    for body_id in sorted(sym_points.body_points):
+        recs = sym_points.body_points[body_id]
+        for rec in recs:
+            body_ids_flat.append(body_id)
+            r_local_fns.append(_make_r_local_fn(rec.r_local, _body_sym_list, points_sym_list))
+        pt_body_slices[body_id] = slice(cursor, cursor + len(recs))
+        cursor += len(recs)
+
+    return body_ids_flat, r_local_fns, pt_body_slices
+
+
 def make_points_evaluator_mainint(
     sym_points: SymbolicPointsCache3D,
     points_sym_list: list,
@@ -517,24 +564,12 @@ def make_points_evaluator_mainint(
 
     # ── Build lambdified r_local fns for every body-attached point ────────
     # Flat order: body_id ASC, then point_idx ASC within each body.
-    body_ids_flat:   list = []
-    body_0idx_flat:  list = []  # 0-indexed (body_id - 1)
-    r_local_fns_flat: list = []
-    pt_body_slices:  dict = {}
-    cursor = 0
-
     _body_sym_list = list(body_sym_list)
-    for body_id in sorted(sym_points.body_points):
-        recs = sym_points.body_points[body_id]
-        for rec in recs:
-            body_ids_flat.append(body_id)
-            body_0idx_flat.append(body_id - 1)
-            r_local_fns_flat.append(_make_r_local_fn(rec.r_local, _body_sym_list, points_sym_list))
-        n_pts = len(recs)
-        pt_body_slices[body_id] = slice(cursor, cursor + n_pts)
-        cursor += n_pts
-
-    n_body_pts = cursor
+    body_ids_flat, r_local_fns_flat, pt_body_slices = _flatten_body_points(
+        sym_points, _body_sym_list, points_sym_list,
+    )
+    body_0idx_flat = [b - 1 for b in body_ids_flat]  # 0-indexed (body_id - 1)
+    n_body_pts = len(body_ids_flat)
 
     # ── Build lambdified r_local fns for ground points ────────────────────
     gr_r_local_fns: list = [

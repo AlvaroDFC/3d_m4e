@@ -115,6 +115,16 @@ All keys are optional.  Unrecognized keys raise ``ValueError``.
             "g_vec": [0, 0, -9.81],
             "g_app": [1.0, 0.5, 0.0],   # optional; default = [1.0, ...]
         }
+
+Time-dependent forces
+----------------------
+The SymPy symbol named ``"t"`` is reserved to mean *simulation time*.  Any
+constitutive expression (force/moment component, spring/damper constant,
+gravity vector component, ...) may reference ``t`` directly, e.g.
+``sym.sin(t)``.  ``t`` must **not** be declared in ``force_sym`` /
+``points_sym`` — it is supplied automatically by the integrator at every
+evaluation and is excluded from ``mainSymVars``.  A force definition that
+references ``t`` anywhere sets :attr:`ForcesDefinition3D.is_time_dependent`.
 """
 
 from __future__ import annotations
@@ -123,6 +133,31 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import sympy as sym
+
+#: Reserved symbol meaning "simulation time".  Any constitutive expression
+#: containing this symbol is evaluated fresh at every integrator step/stage
+#: (see ``forces_runtime_3d.py``); it must never be included in ``force_sym``
+#: or ``points_sym``.
+T_SYM = sym.Symbol("t")
+
+#: The reserved name backing :data:`T_SYM`.  Recognition of "the time symbol"
+#: is **name-based** (see :func:`is_time_symbol`), not object-identity-based:
+#: a user-created ``sym.Symbol("t", real=True)`` (different assumptions than
+#: :data:`T_SYM`, hence a distinct SymPy object) is still treated as time.
+RESERVED_TIME_NAME = "t"
+
+
+def is_time_symbol(s: Any) -> bool:
+    """Return *True* if *s* is (any) SymPy symbol named ``"t"``.
+
+    Matches by **name**, not object identity — two ``sym.Symbol("t")``
+    instances with different assumptions (e.g. plain vs. ``real=True``) are
+    distinct SymPy objects (``==`` is *False*, hash differs), but both are
+    intended to mean "simulation time" here.  Prefer importing and using
+    :data:`T_SYM` directly in new code; this function exists so any symbol
+    literally named ``"t"`` is still recognized.
+    """
+    return isinstance(s, sym.Symbol) and s.name == RESERVED_TIME_NAME
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +322,10 @@ class ForcesDefinition3D:
     tension_dampers : list[TensionDamperDef]
     torsion_springs : list[TorsionSpringDef]
     torsion_dampers : list[TorsionDamperDef]
+    is_time_dependent : bool
+        *True* if any constitutive expression references the reserved time
+        symbol :data:`T_SYM` (``sym.Symbol("t")``).  Set by
+        :func:`parse_force_dict`; *False* for a default-constructed instance.
     """
 
     cg_forces:       List[CGForceDef]       = field(default_factory=list)
@@ -296,6 +335,7 @@ class ForcesDefinition3D:
     torsion_springs: List[TorsionSpringDef] = field(default_factory=list)
     torsion_dampers: List[TorsionDamperDef] = field(default_factory=list)
     gravity:         Optional[GravityDef]   = field(default=None)
+    is_time_dependent: bool                 = field(default=False)
 
     # ── Public query helpers ──────────────────────────────────────────────────────────
 
@@ -311,13 +351,24 @@ class ForcesDefinition3D:
             self.gravity is not None,
         ])
 
-    def collect_symbols(self) -> List[sym.Symbol]:
+    def collect_symbols(self, *, include_time: bool = False) -> List[sym.Symbol]:
         """Return all free SymPy symbols appearing in force parameters.
 
         Symbols are returned in first-seen declaration order; duplicates are
         dropped.  This list is derived by scanning the parsed records; it is
         **not** the same as (though it should match) the user-declared
         ``force_sym`` dict.
+
+        Parameters
+        ----------
+        include_time : bool, optional
+            If *False* (default), any symbol named ``"t"`` (see
+            :func:`is_time_symbol`) is excluded — callers using this list to
+            determine which symbols the user must supply in ``force_sym``
+            should use the default, since ``t`` is supplied automatically
+            and never user-declared.  Pass *True* to get the raw set of
+            every free symbol, including ``t`` (used internally to detect
+            time-dependence).
 
         Returns
         -------
@@ -328,6 +379,8 @@ class ForcesDefinition3D:
         def _scan(expr: Any) -> None:
             if isinstance(expr, sym.Basic):
                 for s in expr.free_symbols:
+                    if not include_time and is_time_symbol(s):
+                        continue
                     seen.setdefault(s, None)
 
         def _scan_vec(vec: Sequence[Any]) -> None:
@@ -548,6 +601,10 @@ def parse_force_dict(
             nb = n_bodies if n_bodies is not None else 0
             g_app = tuple(1.0 for _ in range(nb))
         fd.gravity = GravityDef(g_vec, g_app)
+
+    fd.is_time_dependent = any(
+        is_time_symbol(s) for s in fd.collect_symbols(include_time=True)
+    )
     return fd
 
 

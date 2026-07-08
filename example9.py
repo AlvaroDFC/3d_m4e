@@ -1,4 +1,6 @@
 # Example 9 - Define a simple double pendulum system
+import sympy as sym
+
 L = 1.0 # Length of the main rotor blades
 data = {
         "NBodies": 2,
@@ -11,11 +13,17 @@ data = {
         "axis_u2": [None, None],
         "rot_param": [None, None]
     }
+
+t = sym.symbols("t", real=True)
+
 Force = {
     "Gravity": {
         "g_vec": [0, 0, -9.81],
         "g_app": [1, 1]
     },
+    "CG": {
+        1: {"force": [100*sym.sin(t),0,0]}
+    }
 }
 
 # Per-body masses [kg] and body-frame inertia tensors [kg·m²].
