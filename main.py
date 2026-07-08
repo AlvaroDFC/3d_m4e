@@ -184,6 +184,15 @@ n_qi = mbd.total_cfg_dof
 print(f"Final q_int: {np.array(sol.ys[-1, :n_qi]).round(4)}")
 print(f"Final qd:    {np.array(sol.ys[-1, n_qi:]).round(4)}")
 
+# ── B matrix at the final ODE step ───────────────────────────────────────────
+q_int_last       = np.array(sol.ys[-5, :n_qi])
+qd_last          = np.array(sol.ys[-5, n_qi:])
+q_user_last      = mbd.map_q_int_to_q_user(q_int_last)
+mainNumVars_last = np.concatenate([q_user_last, qd_last])
+B_last           = mbd.evaluate_B(mainNumVars_last)
+print("\nB matrix at final ODE step:")
+print(np.array(B_last))
+
 ## Added part
 import matplotlib.pyplot as plt
 
@@ -213,7 +222,7 @@ ax_qd.grid(True)
 
 fig.suptitle("Coordinates and velocities over time")
 plt.tight_layout()
-plt.show()
+
 
 ####### Kinetic and potential energy over time ##################################
 energy  = mbd.compute_energy(sol, mainNumVars)
@@ -231,7 +240,7 @@ ax_e.set_title("Kinetic, potential and total mechanical energy")
 ax_e.legend()
 ax_e.grid(True)
 plt.tight_layout()
-plt.show()
+
 
 # ── Per-body energies ────────────────────────────────────────────────────────
 fig_b, axes_b = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
@@ -255,7 +264,7 @@ ax_pe.legend()
 ax_pe.grid(True)
 
 plt.tight_layout()
-plt.show()
+
 
 # ── Per-body linear and angular velocities ───────────────────────────────────
 kin = mbd.compute_kinematics(sol, mainNumVars)
@@ -287,7 +296,7 @@ for ax in axes_v[-1, :]:
     ax.set_xlabel("Time [s]")
 
 plt.tight_layout()
-plt.show()
+
 
 # ── CG position and orientation trajectories ─────────────────────────────────
 fig_p, axes_p = plt.subplots(_NB_e, 2, figsize=(12, 4 * _NB_e), sharex=True)
