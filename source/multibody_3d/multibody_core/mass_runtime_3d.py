@@ -365,10 +365,6 @@ def make_eom_evaluator_mainint(
 # Energy postprocessing (not part of the integration loop)
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Energy postprocessing (not part of the integration loop)
-# ---------------------------------------------------------------------------
-
 def compute_energy_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> EnergyResult:
     """Compute kinetic / potential energy time series from an integrated solution.
 

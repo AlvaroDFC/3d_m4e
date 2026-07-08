@@ -152,6 +152,17 @@ def _make_eom_vector_field(mbd, const_body, const_force, const_points):
     kinematics symbolically), their ``.freeze()`` method is called here to
     pre-evaluate geometry once and return a fully ``@jax.jit``-traceable
     function compatible with diffrax.
+
+    Time-dependent forces
+    ---------------------
+    ``t`` is diffrax's own traced stage time (it is already the first
+    argument of every vector-field call, at every adaptive RK sub-stage, not
+    just at saved output points) and is forwarded unchanged to
+    ``forces_func(mainint, t)``.  Constitutive expressions that reference the
+    reserved symbol ``force_definition_3d.T_SYM`` are re-evaluated from this
+    traced ``t`` on every call; static (non-time-dependent) systems pay no
+    extra cost, since ``forces_func`` resolves this branch once at trace
+    time (see ``forces_runtime_3d._finalize_const_vals``).
     """
     NB        = mbd.NBodies
     n_qi      = mbd.total_cfg_dof
@@ -200,7 +211,7 @@ def _make_eom_vector_field(mbd, const_body, const_force, const_points):
 
         # External wrenches: (NB, 6) ravel -> (6*NB,)
         if _forces_func is not None:
-            f_ext = _forces_func(mainint).total.ravel()
+            f_ext = _forces_func(mainint, t).total.ravel()
         else:
             f_ext = jnp.zeros(6 * NB, dtype=jnp.float64)
 

@@ -46,6 +46,7 @@ from .force_definition_3d import (
     TorsionSpringDef,
     TorsionDamperDef,
     parse_force_dict,
+    is_time_symbol,
 )
 from .forces_symbolic_3d import (
     SymbolicForcesCache3D,
@@ -225,6 +226,7 @@ class MbdSystem3D:
         self.joint_system = JointSystem3D.from_data(self.data)
         self.coords       = build_joint_coordinates(self.joint_system)
         self.vt           = VelocityTransformation3D(self.joint_system)
+        self._check_no_reserved_time_symbol()
         # Parse Force dictionary early so validation fires before any
         # expensive symbolic or JAX work.
         if self.Force:
@@ -371,6 +373,35 @@ class MbdSystem3D:
             )
 
     # ── Private shape validators ─────────────────────────────────────────────
+
+    def _check_no_reserved_time_symbol(self) -> None:
+        """Raise a clear error if the reserved time symbol is misdeclared.
+
+        The symbol named ``"t"`` is reserved to mean simulation time inside
+        ``Force`` expressions (see ``force_definition_3d.is_time_symbol``);
+        it is supplied automatically by the integrator/postprocessors and
+        must never be declared in ``body_data_sym``, ``force_points_sym``, or
+        ``points_sym`` — doing so silently freezes it at whatever constant
+        value is passed in ``mainNumVars`` for the *entire* solve (e.g.
+        ``sin(t=0.0) == 0`` forever), which looks like "the force does
+        nothing" with no other symptom.
+        """
+        for dict_name, sym_dict in (
+            ("body_data_sym", self.body_data_sym),
+            ("force_points_sym", self.force_points_sym),
+            ("points_sym", self.points_sym),
+        ):
+            for key, s in sym_dict.items():
+                if is_time_symbol(s):
+                    raise ValueError(
+                        f"{dict_name}[{key!r}] uses a symbol named 't', which is "
+                        "reserved to mean simulation time in Force expressions. "
+                        "Remove it from this dict — do not declare 't' as a "
+                        "body/force/point parameter; the integrator supplies it "
+                        "automatically. Just reference 't' directly inside your "
+                        "Force expressions (any sympy.Symbol('t') works, e.g. "
+                        "'force_definition_3d.T_SYM' or your own sym.symbols('t'))."
+                    )
 
     def _validate_q_user_shape(self, q_user_np) -> np.ndarray:
         """Flatten and check that *q_user_np* has length ``total_user_dof``."""
@@ -889,7 +920,7 @@ class MbdSystem3D:
         arr = self._validate_mainNumVars_shape(mainNumVars)
         return self.points_func(self._build_mainNumVars_int(arr))
 
-    def evaluate_forces(self, mainNumVars) -> "ForcesEvalResult":
+    def evaluate_forces(self, mainNumVars, t: float = 0.0) -> "ForcesEvalResult":
         """Evaluate per-body 6-DOF wrenches and spring potential energy.
 
         Accepts the same user-facing ``mainNumVars`` vector as
@@ -901,6 +932,13 @@ class MbdSystem3D:
         mainNumVars : array_like, shape ``(len(mainSymVars),)``
             User-facing variable vector
             ``[q_user, qd, body_params, force_params, point_params]``.
+        t : float, optional
+            Simulation time.  Only relevant when the declared forces
+            reference the reserved time symbol (``force_definition_3d.T_SYM``,
+            ``forces_def.is_time_dependent``); ignored otherwise.  During
+            :meth:`integrate`, this is supplied automatically at every
+            adaptive solver stage \u2014 this parameter exists for standalone
+            inspection/debugging calls.
 
         Returns
         -------
@@ -922,7 +960,7 @@ class MbdSystem3D:
                 "in the example module.  forces_func is None."
             )
         arr = self._validate_mainNumVars_shape(mainNumVars)
-        return self.forces_func(self._build_mainNumVars_int(arr))
+        return self.forces_func(self._build_mainNumVars_int(arr), t)
 
     def evaluate_mass_matrix(self, mainNumVars) -> "MassEvalResult":
         """Evaluate the generalised mass matrix M = B^T M_body B.

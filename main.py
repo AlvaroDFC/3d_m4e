@@ -47,7 +47,7 @@ mbd.summary_table(precision=3)
 # force_params = np.array([1., 1., 1.])            # Fx1=1, Fy1=1, Fz1=1 (world-frame CG force on body 1)
 # example 9, the double pendulum, has no body params or force params, so mainNumVars is just [q_user, qd].
 q_int_np = np.array([0.0 ,0.0])
-qd_np = np.array([1.0,1.0])
+qd_np = np.array([0.0,0.0])
 q_user_np    = mbd.map_q_int_to_q_user(q_int_np)
 # mainNumVars  = np.concatenate([q_user_np, qd_np, body_params, force_params, points_params])
 mainNumVars  = np.concatenate([q_user_np, qd_np])
