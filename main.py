@@ -268,6 +268,10 @@ plt.tight_layout()
 
 # ── Per-body linear and angular velocities ───────────────────────────────────
 kin = mbd.compute_kinematics(sol, mainNumVars)
+
+from multibody_3d import save_trajectory_csv
+save_trajectory_csv(kin, "trajectory.csv")
+
 v_lin_all = kin.v_cg      # (n_steps, NB, 3)
 v_ang_all = kin.omega_cg  # (n_steps, NB, 3)
 _NB_e = mbd.NBodies

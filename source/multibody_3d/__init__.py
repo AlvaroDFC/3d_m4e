@@ -14,6 +14,11 @@ from .multibody_core.velocity_transformation_3d import (
 from .multibody_core.joint_coordinate_3d import build_joint_coordinates, CoordBundle
 from .multibody_core.mbd_system_3d import MbdSystem3D
 from .multibody_core.integrator_3d import integrate_3d
+from .multibody_core.kinematics_runtime_3d import (
+    KinematicsResult,
+    compute_kinematics_3d,
+    save_trajectory_csv,
+)
 from .multibody_core.force_definition_3d import (
     CGForceDef,
     PointForceDef,
@@ -84,4 +89,8 @@ __all__ = [
     # JAX force runtime layer
     "ForcesEvalResult",
     "make_forces_evaluator_mainint",
+    # Kinematics postprocessing
+    "KinematicsResult",
+    "compute_kinematics_3d",
+    "save_trajectory_csv",
 ]
