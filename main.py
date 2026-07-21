@@ -1,6 +1,6 @@
 # main file to run multibody 3D examples
 from multibody_3d import MbdSystem3D
-import example9 as ex
+import example4_copy as ex
 import numpy as np
 from time import time
 import matplotlib.pyplot as plt
@@ -31,7 +31,9 @@ mbd.summary_table(precision=3)
 # # Example 4 ic
 # Internal q for constructing q_user (F-joint uses quaternion internally)
 # q_int_np = np.array([0. ,0. ,0. ,np.cos(np.pi/6) ,0.9659*np.sin(np.pi/6) ,0. ,0.2588*np.sin(np.pi/6), 0.1, 0.2, 0.3])
-# qd_np = np.array([1. ,1. ,2. , 1., 2., 3., 0.1, 0.2, 0.3])
+# qd_np = np.array([0. ,0. ,1. , 0., 0., 0., 0.1, 0.3,-2.0])
+q_int_np = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]) # made for the copy of example4
+qd_np = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.5])
 # # Example 5 ic: R - R- P - R
 # # q_int_np = np.array([np.pi/6, 0.3, 2, 1.1])
 # # qd_np = np.array([0.7, -0.3, 0.4, 1.2])
@@ -46,8 +48,10 @@ mbd.summary_table(precision=3)
 # points_params = np.array([0.3])         # d4=0.3 (endpoint location along link 3 axis)
 # force_params = np.array([1., 1., 1.])            # Fx1=1, Fy1=1, Fz1=1 (world-frame CG force on body 1)
 # example 9, the double pendulum, has no body params or force params, so mainNumVars is just [q_user, qd].
-q_int_np = np.array([0.0 ,0.0])
-qd_np = np.array([0.0,0.0])
+# q_int_np = np.array([0.0 ,0.0])
+# qd_np = np.array([0.0,1.0])
+
+
 q_user_np    = mbd.map_q_int_to_q_user(q_int_np)
 # mainNumVars  = np.concatenate([q_user_np, qd_np, body_params, force_params, points_params])
 mainNumVars  = np.concatenate([q_user_np, qd_np])
@@ -170,12 +174,12 @@ else:
 import diffrax as _diffrax
 sol = mbd.integrate(
     mainNumVars,
-    tspan=(0.0, 100.0),
-    dt=0.01,
-    rtol=1e-6,
-    atol=1e-6,
-    algorithm="Dopri5",
-    max_steps=500_000,
+    tspan=(0.0, 45.0),
+    dt=0.005,
+    rtol=1e-12,
+    atol=1e-12,
+    algorithm="Dopri8",
+    max_steps=2_000_000,
 )
 
 print(f"\nIntegration {'succeeded' if sol.result == _diffrax.RESULTS.successful else 'FAILED'}")
@@ -230,39 +234,46 @@ KE_arr, PE_arr, E_total  = energy.KE, energy.PE, energy.E_total
 KE_body, PE_body         = energy.KE_body, energy.PE_body
 
 # ── System totals ────────────────────────────────────────────────────────────
-fig_e, ax_e = plt.subplots(figsize=(10, 4))
-ax_e.plot(ts, KE_arr,  label="KE")
-ax_e.plot(ts, PE_arr,  label="PE")
-ax_e.plot(ts, E_total, label="Total E", linestyle="--", color="k")
-ax_e.set_xlabel("Time [s]")
+fig_e, (ax_e, ax_etot) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+
+ax_e.plot(ts, KE_arr, label="KE")
+ax_e.plot(ts, PE_arr, label="PE")
 ax_e.set_ylabel("Energy [J]")
-ax_e.set_title("Kinetic, potential and total mechanical energy")
+ax_e.set_title("System kinetic and potential energy")
 ax_e.legend()
 ax_e.grid(True)
+
+ax_etot.plot(ts, E_total, color="k")
+ax_etot.set_ylabel("Total E [J]")
+ax_etot.set_xlabel("Time [s]")
+ax_etot.set_title("Total mechanical energy")
+ax_etot.grid(True)
+
 plt.tight_layout()
 
 
-# ── Per-body energies ────────────────────────────────────────────────────────
-fig_b, axes_b = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+# ── Per-body energies (one row per body, KE left / PE right) ─────────────────
+_NB_en = mbd.NBodies
+fig_b, axes_b = plt.subplots(_NB_en, 2, figsize=(12, 3 * _NB_en), sharex=True)
+if _NB_en == 1:
+    axes_b = axes_b[np.newaxis, :]   # ensure 2-D indexing for single-body case
 
-ax_ke = axes_b[0]
-ax_pe = axes_b[1]
-for b in range(mbd.NBodies):
-    lbl = f"body {b + 1}"
-    ax_ke.plot(ts, KE_body[:, b], label=lbl)
-    ax_pe.plot(ts, PE_body[:, b], label=lbl)
+for b in range(_NB_en):
+    ax_ke = axes_b[b, 0]
+    ax_pe = axes_b[b, 1]
+    ax_ke.plot(ts, KE_body[:, b])
+    ax_pe.plot(ts, PE_body[:, b])
+    ax_ke.set_ylabel("KE [J]")
+    ax_pe.set_ylabel("PE [J]")
+    ax_ke.set_title(f"Body {b + 1} – kinetic energy")
+    ax_pe.set_title(f"Body {b + 1} – potential energy")
+    ax_ke.grid(True)
+    ax_pe.grid(True)
 
-ax_ke.set_ylabel("KE [J]")
-ax_ke.set_title("Per-body kinetic energy")
-ax_ke.legend()
-ax_ke.grid(True)
+for ax in axes_b[-1, :]:
+    ax.set_xlabel("Time [s]")
 
-ax_pe.set_ylabel("PE [J]")
-ax_pe.set_xlabel("Time [s]")
-ax_pe.set_title("Per-body potential energy")
-ax_pe.legend()
-ax_pe.grid(True)
-
+fig_b.suptitle("Per-body kinetic and potential energy")
 plt.tight_layout()
 
 

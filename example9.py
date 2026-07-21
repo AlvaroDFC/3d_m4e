@@ -20,10 +20,11 @@ Force = {
     "Gravity": {
         "g_vec": [0, 0, -9.81],
         "g_app": [1, 1]
-    },
-    "CG": {
-        1: {"force": [100*sym.sin(t),0,0]}
     }
+    # ,
+    # "CG": {
+    #     1: {"force": [0*sym.sin(t),0,0]}
+    # }
 }
 
 # Per-body masses [kg] and body-frame inertia tensors [kg·m²].

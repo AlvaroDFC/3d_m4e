@@ -42,3 +42,38 @@ data = {
     "rot_param": ['euler', None, None, None]
 }
 
+Force = {
+    "Gravity": {
+        "g_vec": [0, 0, -9.81],
+        "g_app": [1, 1, 1, 1]
+    }
+}
+
+# Per-body masses [kg] and body-frame inertia tensors [kg·m²].
+# For a uniform rod of mass 1 kg, length 2 m: Ixx=Iyy≈mL²/12=0.333, Izz≈0 (thin rod).
+body_inertia = {
+    1: {
+        "mass": 1.0,
+        "J": [[0.333, 1.,    2.   ],
+              [1.,    0.333, 0.   ],
+              [2.,    0.,    0.333]],
+    },
+    2: {
+        "mass": 1.0,
+        "J": [[3.33, 0.,   2.  ],
+              [0.,   3.33, 0.  ],
+              [2.,   0.,   3.33]],
+    },
+    3: {
+        "mass": 1.0,
+        "J": [[0.333, 3.,   1.   ],
+              [3.,    0.333, 0.   ],
+              [1.,    0.,    0.333]],
+    },
+    4: {
+        "mass": 1.0,
+        "J": [[3.33, 0.,   0.  ],
+              [0.,   3.33, 0.  ],
+              [0.,   0.,   3.33]],
+    }, 
+}

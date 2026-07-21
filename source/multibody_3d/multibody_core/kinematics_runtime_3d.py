@@ -137,16 +137,19 @@ def compute_kinematics_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> KinematicsRes
             build_cache_jax,
             build_rate_cache_jax,
         )
-        from .points_3d import _flatten_body_points   # noqa: PLC0415
-        from .runtime_context_3d import build_runtime_context   # noqa: PLC0415
+        from .points_3d import _flatten_body_points                # noqa: PLC0415
+        from .runtime_context_3d import build_runtime_context      # noqa: PLC0415
+        from .integrator_3d import _normalize_q_int_jax            # noqa: PLC0415
     except Exception:  # pragma: no cover
         from velocity_transformation_3d import build_cache_jax, build_rate_cache_jax
         from points_3d import _flatten_body_points
         from runtime_context_3d import build_runtime_context
+        from integrator_3d import _normalize_q_int_jax
 
     ctx = build_runtime_context(mbd, mainNumVars)
-    NB   = ctx.NB
-    n_qi = ctx.n_qi
+    NB        = ctx.NB
+    n_qi      = ctx.n_qi
+    per_joint = mbd.coords.per_joint
 
     # ── Flatten declared body points (body_id ASC, point_idx ASC) ───────
     # Shared with make_points_evaluator_mainint (points_3d.py) so both stay
@@ -177,6 +180,8 @@ def compute_kinematics_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> KinematicsRes
     def _kin_at(y):
         q_int = y[:n_qi]
         qd    = y[n_qi:]
+        # Suppress quaternion norm drift accumulated by the numeric integrator
+        q_int = _normalize_q_int_jax(q_int, per_joint)
         A_abs, r_abs, rJ, U, _ = build_cache_jax(q_int, **ctx.pos_cache_kwargs)
         omega_abs, v_abs, _, _ = build_rate_cache_jax(
             q_int, qd, A_abs=A_abs, r_abs=r_abs, rJ=rJ, U=U,
