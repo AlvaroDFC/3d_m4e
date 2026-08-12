@@ -409,16 +409,13 @@ def compute_energy_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> EnergyResult:
     try:
         from .velocity_transformation_3d import build_cache_jax   # noqa: PLC0415
         from .runtime_context_3d import build_runtime_context     # noqa: PLC0415
-        from .integrator_3d import _normalize_q_int_jax           # noqa: PLC0415
     except Exception:  # pragma: no cover
         from velocity_transformation_3d import build_cache_jax
         from runtime_context_3d import build_runtime_context
-        from integrator_3d import _normalize_q_int_jax
 
     ctx  = build_runtime_context(mbd, mainNumVars)
     NB   = ctx.NB
     n_qi = ctx.n_qi
-    per_joint = mbd.coords.per_joint
 
     # ── Gravity vector and per-body applied fraction ────────────────────────
     gd = mbd.forces_def.gravity if mbd.forces_def is not None else None
@@ -434,10 +431,8 @@ def compute_energy_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> EnergyResult:
     def _energy_at(y):
         q_int = y[:n_qi]
         qd    = y[n_qi:]
-        # Suppress quaternion norm drift accumulated by the numeric integrator
-        q_int     = _normalize_q_int_jax(q_int, per_joint)
         # Kinetic energy: T = ½ qd^T M(q) qd  (M = B^T M_body B)
-        mainint_y = ctx.build_mainint(jnp.concatenate([q_int, qd]))
+        mainint_y = ctx.build_mainint(y)
         eom_res   = ctx.eom_e(mainint_y)
         M_gen     = eom_res.M
         KE        = 0.5 * (qd @ M_gen @ qd)

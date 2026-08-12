@@ -251,21 +251,6 @@ class MbdSystem3D:
                             list(self.force_points_sym.values()) +
                             list(self.points_sym.values()))
         self._build_slice_metadata()
-        # Build symbolic points cache and JAX point evaluator if Initial_Points was supplied.
-        # TODO: initial points and forces defnition may have different symbolic parameters. Are both allowed?
-        if self.Initial_Points:
-            _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
-            self.sym_points = build_points_symbolic(
-                self.Initial_Points, _pos_cache, self.NBodies,
-            )
-        elif self.forces_def is not None or self.body_inertia:
-            # No Initial_Points, but Force or body_inertia is declared:
-            # build pos_cache for torsion axes / world-frame inertia;
-            # sym_points gets only CG records.
-            _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
-            self.sym_points = build_points_symbolic({}, _pos_cache, self.NBodies)
-        else:
-            _pos_cache = None
         # Build runtime state once: frozen geometry params + JIT-compiled evaluators.
         self._numeric_params = self.vt.build_numeric_params()
         self._geom_extractor = self.vt.build_geometry_extractor(
@@ -289,9 +274,9 @@ class MbdSystem3D:
             self.sym_points = build_points_symbolic(
                 self.Initial_Points, _pos_cache, self.NBodies,
             )
-        elif self.forces_def is not None:
-            # No Initial_Points, but Force is declared: build pos_cache
-            # for torsion axes; sym_points gets only CG records.
+        elif self.forces_def is not None or self.body_inertia:
+            # No Initial_Points, but Force or body_inertia is declared: build pos_cache
+            # for torsion axes / world-frame inertia; sym_points gets only CG records.
             _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
             self.sym_points = build_points_symbolic({}, _pos_cache, self.NBodies)
         else:
@@ -1115,10 +1100,11 @@ class MbdSystem3D:
         *,
         tspan,
         dt=None,
-        rtol: float = 1e-6,
-        atol: float = 1e-6,
-        algorithm: str = "Dopri5",
-        max_steps: int = 500_000,
+        rtol: float = 1e-12,
+        atol: float = 1e-12,
+        algorithm: str = "Dopri8",
+        max_steps: int = 2_000_000,
+        dtmax: float = None,
     ):
         """Numerically integrate the equations of motion.
 
@@ -1140,6 +1126,11 @@ class MbdSystem3D:
             Diffrax solver name (``"Dopri5"``, ``"Dopri8"``, ``"Tsit5"``, …).
         max_steps : int
             Maximum number of internal solver steps before raising an error.
+        dtmax : float or None
+            Hard upper bound on the adaptive step size.  Set to a value
+            ``<= dt`` to cap internal steps and prevent energy drift in
+            smooth conservative systems.  *None* (default) leaves the PID
+            controller uncapped.
 
         Returns
         -------
@@ -1155,6 +1146,7 @@ class MbdSystem3D:
             rtol=rtol, atol=atol,
             algorithm=algorithm,
             max_steps=max_steps,
+            dtmax=dtmax,
         )
 
     def compute_energy(self, sol, mainNumVars):

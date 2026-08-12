@@ -61,20 +61,23 @@ def _omega_matrix_jax(omega: jnp.ndarray) -> jnp.ndarray:
     ::
 
         Omega = [[ 0,  -ox, -oy, -oz],
-                 [ox,   0,  -oz,  oy],
-                 [oy,   oz,   0, -ox],
-                 [oz,  -oy,  ox,   0]]
+                 [ox,   0,   oz, -oy],
+                 [oy,  -oz,  0,   ox],
+                 [oz,   oy,  -ox, 0  ]]
 
-    Used as ``q_dot = 0.5 * Omega @ q`` where *omega* is the relative
-    angular velocity expressed in the **parent** frame (left-multiplication).
+    Used as ``q_dot = 0.5 * Omega @ q``.
+
+    NOTE: this is the RIGHT-multiplication (body-frame) formula and is
+    INCORRECT for this codebase where joint speeds are in the parent/global
+    frame.  Kept here for reference.  See integrator_3d.py for the fix.
     """
     ox, oy, oz = omega[0], omega[1], omega[2]
     z = jnp.zeros_like(ox)
     return jnp.stack([
         jnp.stack([ z,  -ox,  -oy,  -oz]),
-        jnp.stack([ox,    z,  -oz,   oy]),
-        jnp.stack([oy,   oz,    z,  -ox]),
-        jnp.stack([oz,  -oy,   ox,    z]),
+        jnp.stack([ox,    z,   oz,  -oy]),
+        jnp.stack([oy,  -oz,    z,   ox]),
+        jnp.stack([oz,   oy,  -ox,    z]),
     ])
 
 

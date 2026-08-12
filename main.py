@@ -1,6 +1,6 @@
 # main file to run multibody 3D examples
 from multibody_3d import MbdSystem3D
-import example4_copy as ex
+import example2 as ex
 import numpy as np
 from time import time
 import matplotlib.pyplot as plt
@@ -23,8 +23,8 @@ mbd.summary_table(precision=3)
 # # q_int_np = np.array([0.1 ,0.2 ,0.3])
 # # qd_np = np.array([1., 3., 3.])
 # # Example 2 ic: spherical revolute pendulum
-# # q_int_np = np.array([0.9659, 0., 0., 0.2588, -np.pi/6])
-# # qd_np = np.array([0.3, -0.2, 0.5, 1.1])
+q_int_np = np.array([0.9659, 0., 0., 0.2588, -np.pi/12])
+qd_np = np.array([0.0, -0.0, 0.0, 0.0])
 # # Example 3 ic: Cylindrical + revolut + spherical
 # # q_int_np = np.array([0.3, -0.2, 0.5, 0.4, 0.2, 0, 0])
 # # qd_np = np.array([0.7, -0.3, 0.4, 1.2])
@@ -32,8 +32,8 @@ mbd.summary_table(precision=3)
 # Internal q for constructing q_user (F-joint uses quaternion internally)
 # q_int_np = np.array([0. ,0. ,0. ,np.cos(np.pi/6) ,0.9659*np.sin(np.pi/6) ,0. ,0.2588*np.sin(np.pi/6), 0.1, 0.2, 0.3])
 # qd_np = np.array([0. ,0. ,1. , 0., 0., 0., 0.1, 0.3,-2.0])
-q_int_np = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]) # made for the copy of example4
-qd_np = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.5])
+# q_int_np = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]) # made for the copy of example4
+# qd_np = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  0.5, 0.1, 0.5])
 # # Example 5 ic: R - R- P - R
 # # q_int_np = np.array([np.pi/6, 0.3, 2, 1.1])
 # # qd_np = np.array([0.7, -0.3, 0.4, 1.2])
@@ -174,12 +174,13 @@ else:
 import diffrax as _diffrax
 sol = mbd.integrate(
     mainNumVars,
-    tspan=(0.0, 45.0),
-    dt=0.005,
+    tspan=(0.0, 1.0),
+    dt=0.05,
     rtol=1e-12,
     atol=1e-12,
     algorithm="Dopri8",
-    max_steps=2_000_000,
+    max_steps=10_000_000,
+    dtmax=0.01,
 )
 
 print(f"\nIntegration {'succeeded' if sol.result == _diffrax.RESULTS.successful else 'FAILED'}")
@@ -233,6 +234,15 @@ energy  = mbd.compute_energy(sol, mainNumVars)
 KE_arr, PE_arr, E_total  = energy.KE, energy.PE, energy.E_total
 KE_body, PE_body         = energy.KE_body, energy.PE_body
 
+# ── Energy conservation diagnostics ─────────────────────────────────────────
+_E0    = E_total[0]
+_drift = E_total - _E0
+print(f"\nInitial total energy : {_E0:.6f} J")
+print(f"Final total energy   : {E_total[-1]:.6f} J")
+print(f"Peak drift           : {np.max(np.abs(_drift)):.3e} J  "
+      f"({np.max(np.abs(_drift)) / abs(_E0) * 100:.3e} %)")
+print(f"Internal steps used  : {int(sol.stats['num_steps'])} / 10 000 000")
+
 # ── System totals ────────────────────────────────────────────────────────────
 fig_e, (ax_e, ax_etot) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
 
@@ -249,10 +259,7 @@ ax_etot.set_xlabel("Time [s]")
 ax_etot.set_title("Total mechanical energy")
 ax_etot.grid(True)
 
-plt.tight_layout()
-
-
-# ── Per-body energies (one row per body, KE left / PE right) ─────────────────
+plt.tight_layout(h_pad=2.5) #(one row per body, KE left / PE right)
 _NB_en = mbd.NBodies
 fig_b, axes_b = plt.subplots(_NB_en, 2, figsize=(12, 3 * _NB_en), sharex=True)
 if _NB_en == 1:
@@ -274,14 +281,11 @@ for ax in axes_b[-1, :]:
     ax.set_xlabel("Time [s]")
 
 fig_b.suptitle("Per-body kinetic and potential energy")
-plt.tight_layout()
+plt.tight_layout(rect=[0, 0, 1, 0.97], h_pad=2.5)
 
 
 # ── Per-body linear and angular velocities ───────────────────────────────────
 kin = mbd.compute_kinematics(sol, mainNumVars)
-
-from multibody_3d import save_trajectory_csv
-save_trajectory_csv(kin, "trajectory.csv")
 
 v_lin_all = kin.v_cg      # (n_steps, NB, 3)
 v_ang_all = kin.omega_cg  # (n_steps, NB, 3)
@@ -298,8 +302,8 @@ for b in range(_NB_e):
     for k in range(3):
         ax_lin.plot(ts, v_lin_all[:, b, k], label=f"v_{xyz[k]}")
         ax_ang.plot(ts, v_ang_all[:, b, k], label=f"ω_{xyz[k]}")
-    ax_lin.set_title(f"Body {b + 1} – linear velocity (world frame)")
-    ax_ang.set_title(f"Body {b + 1} – angular velocity (world frame)")
+    ax_lin.set_title(f"Body {b + 1} – linear velocity (world frame)", fontsize=7)
+    ax_ang.set_title(f"Body {b + 1} – angular velocity (world frame)", fontsize=7)
     ax_lin.set_ylabel("m/s")
     ax_ang.set_ylabel("rad/s")
     ax_lin.legend()
@@ -310,7 +314,7 @@ for b in range(_NB_e):
 for ax in axes_v[-1, :]:
     ax.set_xlabel("Time [s]")
 
-plt.tight_layout()
+plt.tight_layout(pad=1.5, h_pad=2.5)
 
 
 # ── CG position and orientation trajectories ─────────────────────────────────
@@ -325,8 +329,8 @@ for b in range(_NB_e):
     for k in range(3):
         ax_r.plot(ts, kin.r_cg[:, b, k], label=xyz[k])
         ax_o.plot(ts, kin.euler_cg[:, b, k], label=euler_labels[k])
-    ax_r.set_title(f"Body {b + 1} – CG position (world frame)")
-    ax_o.set_title(f"Body {b + 1} – CG orientation (intrinsic Z-Y-X)")
+    ax_r.set_title(f"Body {b + 1} – CG position (world frame)", fontsize=7)
+    ax_o.set_title(f"Body {b + 1} – CG orientation (intrinsic Z-Y-X)", fontsize=7)
     ax_r.set_ylabel("m")
     ax_o.set_ylabel("rad")
     ax_r.legend()
@@ -337,6 +341,6 @@ for b in range(_NB_e):
 for ax in axes_p[-1, :]:
     ax.set_xlabel("Time [s]")
 
-plt.tight_layout()
+plt.tight_layout(pad=1.5, h_pad=2.5)
 plt.show()
 
