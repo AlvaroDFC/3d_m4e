@@ -137,3 +137,22 @@ qd_ic = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
 
 END_TIME = 10.0  # matches floating_tristar.simulation.yaml's end_time
 DT = 0.005       # matches floating_tristar.simulation.yaml's time_step
+
+# ── Initial conditions and numerical parameters ───────────────────────────────
+# F (euler) at identity orientation, so q_user is all zeros (same state as q_int_ic).
+q_user_np = np.zeros(9)
+qd_np     = qd_ic
+
+body_data_sym = {}
+force_sym     = {}
+points_sym    = {}
+
+body_params   = np.ones(len(body_data_sym))
+force_params  = np.ones(len(force_sym))
+points_params = np.ones(len(points_sym))
+
+# ── Simulation ─────────────────────────────────────
+tspan             = END_TIME
+TimeStep          = DT
+integrator_kwargs = {"rtol": 1e-12, "atol": 1e-12, "algorithm": "Dopri8",
+                     "max_steps": 10_000_000, "dtmax": 0.01}

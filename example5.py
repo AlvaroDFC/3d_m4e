@@ -1,3 +1,4 @@
+import numpy as np
 import sympy as sym
 
 sqrt = sym.sqrt
@@ -42,3 +43,24 @@ data = {
     "axis_u2": [None, None, None, None],  # not used
     "rot_param": [None, None, None, None]  # not used for R/P joints
 }
+
+# Placeholder mass [kg] and isotropic inertia [kg·m²] for every body; replace with real values.
+body_inertia = {b: {"mass": 1.0, "J": (0.01 * np.eye(3)).tolist()} for b in range(1, 5)}
+
+# ── Initial conditions and numerical parameters ───────────────────────────────
+q_user_np = np.array([np.pi/6, 0.3, 2.0, 1.1])
+qd_np     = np.array([0.7, -0.3, 0.4, 1.2])
+
+body_data_sym = {}
+force_sym     = {}
+points_sym    = {}
+
+body_params   = np.ones(len(body_data_sym))
+force_params  = np.ones(len(force_sym))
+points_params = np.ones(len(points_sym))
+
+# ── Simulation ─────────────────────────────────────
+tspan             = 10.0
+TimeStep          = 0.05
+integrator_kwargs = {"rtol": 1e-12, "atol": 1e-12, "algorithm": "Dopri8",
+                     "max_steps": 10_000_000, "dtmax": 0.01}

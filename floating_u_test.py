@@ -23,3 +23,22 @@ body_inertia = {
     2: {"mass": 1.0, "J": (0.5 * np.eye(3)).tolist()},
 }
 Force = {"Gravity": {"g_vec": [0.0, 0.0, -0.1]}}
+
+# ── Initial conditions and numerical parameters ───────────────────────────────
+# F (quat): x, y, z, e0..e3 | U: alpha, beta.  Matches the SEA-Stack cross-validation IC.
+q_user_np = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+qd_np     = np.array([0.2, 0.3, 0.0, 0.3, 0.4, 0.5, 0.6, 0.8])
+
+body_data_sym = {}
+force_sym     = {}
+points_sym    = {}
+
+body_params   = np.ones(len(body_data_sym))
+force_params  = np.ones(len(force_sym))
+points_params = np.ones(len(points_sym))
+
+# ── Simulation ─────────────────────────────────────
+tspan             = 10.0
+TimeStep          = 0.05
+integrator_kwargs = {"rtol": 1e-12, "atol": 1e-12, "algorithm": "Dopri8",
+                     "max_steps": 10_000_000, "dtmax": 0.01}

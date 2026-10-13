@@ -11,6 +11,7 @@ Not included: EOM assembly, numerical integration.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Callable, Optional
@@ -633,6 +634,20 @@ class MbdSystem3D:
         fp_sym  = getattr(ex, "force_points_sym", {})
         f_sym   = getattr(ex, "force_sym", {})
         merged_force_sym = {**fp_sym, **f_sym}
+        body_inertia = getattr(ex, "body_inertia", None)
+        if not body_inertia:
+            n_bodies = len(ex.data["joints"])
+            warnings.warn(
+                f"Example '{ex.__name__}' defines no body_inertia; using mass 1.0 kg and "
+                f"inertia 0.01*I for each of its {n_bodies} bodies. Define body_inertia "
+                f"in the example to silence this warning.",
+                UserWarning,
+                stacklevel=2,
+            )
+            body_inertia = {
+                b: {"mass": 1.0, "J": (0.01 * np.eye(3)).tolist()}
+                for b in range(1, n_bodies + 1)
+            }
         return cls(
             data=ex.data,
             body_data_sym=getattr(ex, "body_data_sym", {}),
@@ -640,7 +655,7 @@ class MbdSystem3D:
             points_sym=getattr(ex, "points_sym", {}),
             Initial_Points=getattr(ex, "Initial_Points", {}),
             Force=getattr(ex, "Force", {}),
-            body_inertia=getattr(ex, "body_inertia", {}),
+            body_inertia=body_inertia,
         )
 
     # ── Topology / sizing properties ─────────────────────────────────────────

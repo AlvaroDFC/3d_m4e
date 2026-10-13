@@ -77,3 +77,23 @@ body_inertia = {
               [0.,   0.,   3.33]],
     }, 
 }
+
+# ── Initial conditions and numerical parameters ───────────────────────────────
+# F (euler): x, y, z, phi, theta, psi, then 3 revolute angles.
+# Euler angles of the quaternion [cos(pi/6), 0.9659 sin(pi/6), 0, 0.2588 sin(pi/6)].
+q_user_np = np.array([0.0, 0.0, 0.0, 1.00305577, -0.12531707, 0.22786911, 0.1, 0.2, 0.3])
+qd_np     = np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.1, 0.3, -2.0])
+
+body_data_sym = {}
+force_sym     = {}
+points_sym    = {}
+
+body_params   = np.ones(len(body_data_sym))
+force_params  = np.ones(len(force_sym))
+points_params = np.ones(len(points_sym))
+
+# ── Simulation ─────────────────────────────────────
+tspan             = 10.0
+TimeStep          = 0.05
+integrator_kwargs = {"rtol": 1e-12, "atol": 1e-12, "algorithm": "Dopri8",
+                     "max_steps": 10_000_000, "dtmax": 0.01}

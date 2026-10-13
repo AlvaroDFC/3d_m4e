@@ -1,4 +1,5 @@
 # Example 9 - Define a simple double pendulum system
+import numpy as np
 import sympy as sym
 
 L = 1.0 # Length of the main rotor blades
@@ -43,3 +44,21 @@ body_inertia = {
               [0.33,  0.,    0.01 ]],
     },
 }
+
+# ── Initial conditions and numerical parameters ───────────────────────────────
+q_user_np = np.array([0.0, 0.0])
+qd_np     = np.array([0.0, 1.0])
+
+body_data_sym = {}
+force_sym     = {}
+points_sym    = {}
+
+body_params   = np.ones(len(body_data_sym))
+force_params  = np.ones(len(force_sym))
+points_params = np.ones(len(points_sym))
+
+# ── Simulation ─────────────────────────────────────
+tspan             = 10.0
+TimeStep          = 0.05
+integrator_kwargs = {"rtol": 1e-12, "atol": 1e-12, "algorithm": "Dopri8",
+                     "max_steps": 10_000_000, "dtmax": 0.01}

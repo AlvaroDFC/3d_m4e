@@ -1,4 +1,6 @@
 # Example 2 - Define a simple double pendulum system 
+import numpy as np
+
 data = {
         "NBodies": 2,
         "joints": [(0, 1), (1, 2)],
@@ -33,3 +35,22 @@ Force = {
         "g_app": [1, 1],
     }
 }
+
+# ── Initial conditions and numerical parameters ───────────────────────────────
+# S joint (quat): e0..e3, then the revolute angle.
+q_user_np = np.array([0.9659, 0.0, 0.0, 0.2588, -np.pi/12])
+qd_np     = np.array([1.0, -2.0, 1.0, 1.0])
+
+body_data_sym = {}
+force_sym     = {}
+points_sym    = {}
+
+body_params   = np.ones(len(body_data_sym))
+force_params  = np.ones(len(force_sym))
+points_params = np.ones(len(points_sym))
+
+# ── Simulation ─────────────────────────────────────
+tspan             = 10.0
+TimeStep          = 0.05
+integrator_kwargs = {"rtol": 1e-12, "atol": 1e-12, "algorithm": "Dopri8",
+                     "max_steps": 10_000_000, "dtmax": 0.01}
