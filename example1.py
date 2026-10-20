@@ -17,6 +17,16 @@ data = {
 # Placeholder mass [kg] and isotropic inertia [kg·m²] for every body; replace with real values.
 body_inertia = {b: {"mass": 1.0, "J": (0.01 * np.eye(3)).tolist()} for b in range(1, 4)}
 
+Initial_Points = {
+    "GR": [],
+    "BD": {2: [[0.0, 0.0, 0.0]], 3: [[0.0, 0.0, 0.0]]},
+}
+
+Force = {
+    "TensionSpring": [(2, 0, 3, 0, 2.0, 1.6)],
+    "TorsionSpring": [(1, 0.3, 0.0)],
+}
+
 # ── Initial conditions and numerical parameters ───────────────────────────────
 q_user_np = np.array([0.1, 0.2, 0.3])
 qd_np     = np.array([1.0, 3.0, 3.0])

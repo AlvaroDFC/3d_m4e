@@ -17,11 +17,18 @@ data = {
 
 t = sym.symbols("t", real=True)
 
+Initial_Points = {
+    "GR": [],
+    "BD": {1: [[0.0, 0.0, 0.0]], 2: [[0.0, 0.0, 0.0]]},
+}
+
 Force = {
     "Gravity": {
         "g_vec": [0, 0, -9.81],
         "g_app": [1, 1]
-    }
+    },
+    "TensionSpring": [(1, 0, 2, 0, 4.0, 1.2)],
+    "TorsionSpring": [(1, 0.6, 0.0)],
     # ,
     # "CG": {
     #     1: {"force": [0*sym.sin(t),0,0]}

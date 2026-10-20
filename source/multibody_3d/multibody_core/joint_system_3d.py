@@ -289,6 +289,12 @@ class Joint3D:
             raise ValueError(f"Joint(child={self.child}): self-parenting detected (parent==child).")
 
         # axis requirements
+        if self.type == JointType.FLOATING and self.parent != 0:
+            raise ValueError(
+                f"Joint(child={self.child}, type=F): floating joints must connect "
+                f"ground (parent=0) to a body; got parent={self.parent}."
+            )
+
         if self.type in (JointType.REVOLUTE, JointType.PRISMATIC, JointType.CYLINDRICAL):
             if self._u is None:
                 raise ValueError(f"Joint(child={self.child}, type={self.type.value}): axis_u is required.")

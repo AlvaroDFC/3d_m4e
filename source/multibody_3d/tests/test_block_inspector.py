@@ -77,11 +77,11 @@ def chain_RPS():
 
 
 @pytest.fixture
-def chain_UCF():
-    """3-body chain: U → C → F."""
+def branch_UCF():
+    """3-body branch: ground-rooted U → C chain plus a ground-rooted F body."""
     js = _make_system(
         n_bodies=3,
-        joints=[(0, 1), (1, 2), (2, 3)],
+        joints=[(0, 1), (1, 2), (0, 3)],
         types=["U", "C", "F"],
         p2j=[[1, 0, 0], [0, 1, 0], Z3],
         j2c=[[-1, 0, 0], [0, -1, 0], Z3],
@@ -165,9 +165,9 @@ class TestFormatBBlock:
         assert isinstance(result, str)
         assert len(result) > 0
 
-    def test_all_joint_types(self, chain_RPS, chain_UCF):
+    def test_all_joint_types(self, chain_RPS, branch_UCF):
         """format_B_block must succeed for every joint type R,P,S,U,C,F."""
-        for vt in (chain_RPS, chain_UCF):
+        for vt in (chain_RPS, branch_UCF):
             blocks = _build_B_blocks(vt)
             for blk in blocks.values():
                 result = BlockInspector.format_B_block(blk)
@@ -208,8 +208,8 @@ class TestFormatBdotBlock:
         result = BlockInspector.format_Bdot_block(blocks[(1, 0)], show_matrix=False)
         assert "block =" not in result
 
-    def test_all_joint_types(self, chain_RPS, chain_UCF):
-        for vt in (chain_RPS, chain_UCF):
+    def test_all_joint_types(self, chain_RPS, branch_UCF):
+        for vt in (chain_RPS, branch_UCF):
             blocks = _build_Bdot_blocks(vt)
             for blk in blocks.values():
                 result = BlockInspector.format_Bdot_block(blk)
@@ -366,10 +366,10 @@ def test_usage_example_all_joint_types():
         "axis_u1": [None,None,[1,0,0]],
         "axis_u2": [None,None,[0,1,0]],
     })
-    # Chain B: C, S, F
+    # Chain B: C -> S plus a ground-connected F body
     js_b = JointSystem3D.from_data({
         "NBodies": 3,
-        "joints": [(0,1),(1,2),(2,3)],
+        "joints": [(0,1),(1,2),(0,3)],
         "types":  ["C","S","F"],
         "parent_cg_to_joint": [Z3]*3,
         "joint_to_child_cg":  [Z3]*3,

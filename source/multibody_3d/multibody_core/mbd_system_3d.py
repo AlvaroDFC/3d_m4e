@@ -1169,8 +1169,9 @@ class MbdSystem3D:
 
         Postprocessing operation — not part of :meth:`integrate`.  Re-evaluates
         ``eom_func`` and position kinematics at every saved state in *sol* to
-        recover generalised mass and CG positions, combined with gravity to
-        give per-step, per-body mechanical energy.
+        recover generalised mass and CG positions. System potential energy
+        includes gravity and springs; per-body potential energy includes
+        gravity only, without allocating spring energy between bodies.
 
         Delegates to :func:`mass_runtime_3d.compute_energy_3d`.  The system
         must have ``body_inertia`` declared so that ``eom_func`` is compiled.

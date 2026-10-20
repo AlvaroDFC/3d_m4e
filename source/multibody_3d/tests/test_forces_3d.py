@@ -519,6 +519,46 @@ class TestTensionSpring:
 # Goal 7f — total force aggregation
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("case", ["none", "gravity", "tension", "torsion", "combined", "time_dependent"])
+def test_compute_energy_includes_spring_potential(case):
+    data = {
+        "NBodies": 1, "joints": [(0, 1)], "types": ["R"],
+        "parent_cg_to_joint": [[0, 0, 0]],
+        "joint_to_child_cg": [[1, 0, 0]],
+        "axis_u": [[0, 0, 1]], "axis_u1": [None], "axis_u2": [None],
+    }
+    force = {}
+    if case in ("gravity", "combined"):
+        force["Gravity"] = {"g_vec": [0, -9.81, 0]}
+    if case in ("tension", "combined"):
+        force["TensionSpring"] = [(0, 0, 1, 0, 4.0, 0.7)]
+    if case in ("torsion", "combined", "time_dependent"):
+        stiffness = 3.0 + sym.Symbol("t", real=True) if case == "time_dependent" else 3.0
+        force["TorsionSpring"] = [(0, stiffness, 0.1)]
+    model = MbdSystem3D(
+        data=data, Force=force,
+        Initial_Points={"GR": [[0, 1, 0]], "BD": {1: [[0, 0, 0]]}},
+        body_inertia={1: {"mass": 2.0, "J": (0.5 * np.eye(3)).tolist()}},
+    )
+    times = np.array([0.0, 0.75])
+    angles = np.array([0.2, 0.4])
+    speeds = np.array([0.3, 0.5])
+    solution = SimpleNamespace(ts=times, ys=np.column_stack([angles, speeds]))
+    result = model.compute_energy(solution, solution.ys[0])
+    gravity_pe = 19.62 * np.sin(angles) if "Gravity" in force else np.zeros(2)
+    spring_pe = np.zeros(2)
+    if "TensionSpring" in force:
+        spring_pe += 2.0 * (np.sqrt(2.0 - 2.0 * np.sin(angles)) - 0.7) ** 2
+    if "TorsionSpring" in force:
+        stiffness_values = 3.0 + times if case == "time_dependent" else 3.0
+        spring_pe += 0.5 * stiffness_values * (angles - 0.1) ** 2
+    kinetic = 0.5 * 2.5 * speeds ** 2
+    np.testing.assert_allclose(result.KE, kinetic, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(result.PE, gravity_pe + spring_pe, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(result.E_total, kinetic + gravity_pe + spring_pe, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(result.PE_body[:, 0], gravity_pe, rtol=1e-12, atol=1e-12)
+
+
 class TestTotalForce:
 
     def test_total_is_sum_of_categories(self, mbd_force_rr):
