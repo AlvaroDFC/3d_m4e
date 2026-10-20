@@ -73,7 +73,7 @@ def plot_system_energy(energy):
 
 
 def plot_body_energy(energy):
-    """Plot per-body kinetic (left) and potential (right) energy, one row per body."""
+    """Plot per-body kinetic (left) and gravitational potential (right) energy."""
     ts      = np.asarray(energy.ts)
     n_body  = np.asarray(energy.KE_body).shape[1]
 
@@ -86,14 +86,14 @@ def plot_body_energy(energy):
         ax_ke.set_ylabel("KE [J]")
         ax_pe.set_ylabel("PE [J]")
         ax_ke.set_title(f"Body {b + 1} – kinetic energy")
-        ax_pe.set_title(f"Body {b + 1} – potential energy")
+        ax_pe.set_title(f"Body {b + 1} – gravitational potential energy")
         ax_ke.grid(True)
         ax_pe.grid(True)
 
     for ax in axes[-1]:
         ax.set_xlabel("Time [s]")
 
-    fig.suptitle("Per-body kinetic and potential energy")
+    fig.suptitle("Per-body kinetic and gravitational potential energy")
     fig.tight_layout(rect=[0, 0, 1, 0.97], h_pad=2.5)
     return fig
 
