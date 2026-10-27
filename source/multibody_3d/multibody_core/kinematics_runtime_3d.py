@@ -1,7 +1,8 @@
 """kinematics_runtime_3d.py
 
-Postprocessing helper: CG and declared body-point (``Initial_Points["BD"]``)
-trajectories from an already-integrated solution.
+Postprocessing helper: CG, joint, ground-point and declared body-point
+(``Initial_Points["BD"]``) kinematics from an already-integrated solution
+or from any array of states.
 
 Not part of the ODE right-hand side; call after
 :meth:`MbdSystem3D.integrate` (mirrors ``compute_energy_3d`` in
@@ -12,7 +13,7 @@ geometry / kinematics are used, so this works on any constructed
 
 from __future__ import annotations
 
-from typing import NamedTuple, TYPE_CHECKING
+from typing import NamedTuple, Optional, TYPE_CHECKING
 
 import numpy as np
 
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 class KinematicsResult(NamedTuple):
-    """CG and body-point trajectories from an integrated solution.
+    """World-frame kinematics of every state of an integrated solution.
 
     Produced by :func:`compute_kinematics_3d` (called via
     :meth:`MbdSystem3D.compute_kinematics`).  All arrays are plain
@@ -56,32 +57,44 @@ class KinematicsResult(NamedTuple):
         (yaw-pitch-roll) Tait-Bryan angles ``[roll, pitch, yaw]`` in
         radians.  Not gimbal-lock safe near pitch = +/-90 deg; use
         ``R_cg`` directly for anything requiring robustness.
-    v_cg : ndarray, shape ``(n_steps, NBodies, 3)``
+    v_cg : ndarray, shape ``(n_steps, NBodies, 3)`` or None
         World-frame CG linear velocity.
-    omega_cg : ndarray, shape ``(n_steps, NBodies, 3)``
+    omega_cg : ndarray, shape ``(n_steps, NBodies, 3)`` or None
         World-frame CG angular velocity.
     r_pts : ndarray, shape ``(n_steps, n_body_pts, 3)``
         World-frame positions of every declared body point
         (``Initial_Points["BD"]``), stacked ``(body_id ASC, point_idx ASC)``.
         ``n_body_pts`` is 0 when no body points are declared.
-    v_pts : ndarray, shape ``(n_steps, n_body_pts, 3)``
+    v_pts : ndarray, shape ``(n_steps, n_body_pts, 3)`` or None
         World-frame velocities of the same body points.
     point_body_ids : tuple[int, ...]
         Owning body id for each row of ``r_pts`` / ``v_pts``.
     pt_body_slices : dict[int, slice]
-        Slice into ``r_pts`` / ``v_pts`` for each body id (mirrors
-        ``PointsRuntimeSpec.pt_body_slices``).
+        Slice into ``r_pts`` / ``v_pts`` for each body id.
+    r_joint : ndarray, shape ``(n_steps, NJoints, 3)``
+        World-frame joint location, in the joint declaration order of
+        ``MbdSystem3D.joint_system.joints``: the parent-attached point
+        ``r_parent + A_parent @ parent_cg_to_joint``.  For P/C joints the
+        child-attached point differs by the slider travel.
+    r_gr : ndarray, shape ``(n_gr, 3)``
+        World-frame ground points (``Initial_Points["GR"]``).  Constant over
+        the solution, so it has no time axis.
+
+    The velocity fields are *None* when computed with
+    ``with_velocities=False``.
     """
     ts:       "np.ndarray"
     r_cg:     "np.ndarray"
     R_cg:     "np.ndarray"
     euler_cg: "np.ndarray"
-    v_cg:     "np.ndarray"
-    omega_cg: "np.ndarray"
+    v_cg:     Optional["np.ndarray"]
+    omega_cg: Optional["np.ndarray"]
     r_pts:    "np.ndarray"
-    v_pts:    "np.ndarray"
+    v_pts:    Optional["np.ndarray"]
     point_body_ids: tuple
     pt_body_slices: dict
+    r_joint:  "np.ndarray"
+    r_gr:     "np.ndarray"
 
 
 # ---------------------------------------------------------------------------
@@ -106,26 +119,46 @@ def _rotmat_to_euler_xyz(R: "jnp.ndarray") -> "jnp.ndarray":
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def compute_kinematics_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> KinematicsResult:
-    """Compute CG and declared body-point trajectories from an integrated solution.
+def compute_kinematics_3d(
+    mbd: "MbdSystem3D", sol, mainNumVars, *, with_velocities: bool = True,
+) -> KinematicsResult:
+    """Compute kinematics at every saved state of an integrated solution.
+
+    Thin wrapper around :func:`compute_kinematics_states` using ``sol.ts``
+    and ``sol.ys`` (result of :meth:`MbdSystem3D.integrate`).
+    """
+    return compute_kinematics_states(
+        mbd, sol.ts, sol.ys, mainNumVars, with_velocities=with_velocities,
+    )
+
+
+def compute_kinematics_states(
+    mbd: "MbdSystem3D", ts, ys, mainNumVars, *, with_velocities: bool = True,
+) -> KinematicsResult:
+    """Compute CG, joint, ground and body-point kinematics for a set of states.
 
     Postprocessing operation — not part of the ODE right-hand side.
-    Re-evaluates position/rate kinematics (``build_cache_jax`` /
-    ``build_rate_cache_jax``) at every saved state in *sol* to recover CG
-    translation/rotation and linear/angular velocity for every body, plus
-    world-frame position/velocity of every point declared in
-    ``Initial_Points["BD"]``.
+    Re-evaluates position (and optionally rate) kinematics
+    (``build_cache_jax`` / ``build_rate_cache_jax``) at every state in *ys*.
+    Works on any states, so a snapshot of an initial configuration does not
+    need an integration.
 
     Parameters
     ----------
     mbd : MbdSystem3D
-    sol : diffrax.Solution
-        Result of :meth:`MbdSystem3D.integrate` (or :func:`integrate_3d`).
-        Uses ``sol.ts`` and ``sol.ys``.
+    ts : array_like, shape ``(n_steps,)``
+        Time of each state; copied into the result.
+    ys : array_like, shape ``(n_steps, total_cfg_dof + total_dof)``
+        States ``[q_int, qd]`` (internal configuration, e.g. quaternions for
+        S/F joints).  The ``qd`` columns are unused when
+        ``with_velocities`` is *False*.
     mainNumVars : array_like, shape ``(len(mainSymVars),)``
         The same user-facing vector passed to :meth:`MbdSystem3D.integrate`;
         supplies the constant body/force/point parameter blocks (assumed
-        unchanged throughout the integration).
+        unchanged for all states).
+    with_velocities : bool, optional
+        If *False*, skip the rate kinematics; ``v_cg``, ``omega_cg`` and
+        ``v_pts`` are then *None*.  Default *True*.
 
     Returns
     -------
@@ -137,19 +170,20 @@ def compute_kinematics_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> KinematicsRes
             build_cache_jax,
             build_rate_cache_jax,
         )
-        from .points_3d import _flatten_body_points   # noqa: PLC0415
+        from .points_3d import _flatten_body_points, _make_r_local_fn   # noqa: PLC0415
         from .runtime_context_3d import build_runtime_context   # noqa: PLC0415
     except Exception:  # pragma: no cover
         from velocity_transformation_3d import build_cache_jax, build_rate_cache_jax
-        from points_3d import _flatten_body_points
+        from points_3d import _flatten_body_points, _make_r_local_fn
         from runtime_context_3d import build_runtime_context
 
     ctx = build_runtime_context(mbd, mainNumVars)
     NB   = ctx.NB
+    NJ   = mbd.NJoints
     n_qi = ctx.n_qi
 
     # ── Flatten declared body points (body_id ASC, point_idx ASC) ───────
-    # Shared with make_points_evaluator_mainint (points_3d.py) so both stay
+    # Shared with the force evaluators (points_3d.py) so both stay
     # in sync on ordering / lambdification without duplicating the logic.
     body_sym_list   = list(mbd.body_data_sym.values())
     points_sym_list = list(mbd.points_sym.values())
@@ -176,55 +210,74 @@ def compute_kinematics_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> KinematicsRes
     @jax.jit
     def _kin_at(y):
         q_int = y[:n_qi]
-        qd    = y[n_qi:]
         A_abs, r_abs, rJ, U, _ = build_cache_jax(q_int, **ctx.pos_cache_kwargs)
+
+        r_cg    = jnp.stack([r_abs[b + 1].ravel() for b in range(NB)])  # (NB,3)
+        R_cg    = jnp.stack([A_abs[b + 1]          for b in range(NB)])  # (NB,3,3)
+        euler   = jax.vmap(_rotmat_to_euler_xyz)(R_cg)                   # (NB,3)
+        r_joint = jnp.stack([rJ[j].ravel()         for j in range(NJ)])  # (NJ,3)
+
+        rhos = [A_abs[b0 + 1] @ r_locals_jax[i] for i, b0 in enumerate(body_ids_0idx)]
+        if n_body_pts:
+            r_pts = jnp.stack(
+                [r_abs[b0 + 1].ravel() + rho for b0, rho in zip(body_ids_0idx, rhos)]
+            )
+        else:
+            r_pts = jnp.zeros((0, 3), dtype=jnp.float64)
+
+        if not with_velocities:
+            return r_cg, R_cg, euler, r_joint, r_pts, None, None, None
+
+        qd = y[n_qi:]
         omega_abs, v_abs, _, _ = build_rate_cache_jax(
             q_int, qd, A_abs=A_abs, r_abs=r_abs, rJ=rJ, U=U,
             **ctx.rate_topo_kwargs,
         )
-
-        r_cg  = jnp.stack([r_abs[b + 1].ravel()     for b in range(NB)])  # (NB,3)
-        R_cg  = jnp.stack([A_abs[b + 1]              for b in range(NB)])  # (NB,3,3)
-        v_cg  = jnp.stack([v_abs[b + 1].ravel()      for b in range(NB)])  # (NB,3)
-        omega = jnp.stack([omega_abs[b + 1].ravel()  for b in range(NB)])  # (NB,3)
-        euler = jax.vmap(_rotmat_to_euler_xyz)(R_cg)                       # (NB,3)
-
+        v_cg  = jnp.stack([v_abs[b + 1].ravel()     for b in range(NB)])  # (NB,3)
+        omega = jnp.stack([omega_abs[b + 1].ravel() for b in range(NB)])  # (NB,3)
         if n_body_pts:
-            r_pts_list = []
-            v_pts_list = []
-            for i, b0 in enumerate(body_ids_0idx):
-                A_b  = A_abs[b0 + 1]
-                r_b  = r_abs[b0 + 1].ravel()
-                v_b  = v_abs[b0 + 1].ravel()
-                om_b = omega_abs[b0 + 1].ravel()
-                rl   = r_locals_jax[i]
-                rho  = A_b @ rl
-                r_pts_list.append(r_b + rho)
-                v_pts_list.append(v_b + jnp.cross(om_b, rho))
-            r_pts = jnp.stack(r_pts_list)
-            v_pts = jnp.stack(v_pts_list)
+            v_pts = jnp.stack([
+                v_abs[b0 + 1].ravel() + jnp.cross(omega_abs[b0 + 1].ravel(), rho)
+                for b0, rho in zip(body_ids_0idx, rhos)
+            ])
         else:
-            r_pts = jnp.zeros((0, 3), dtype=jnp.float64)
             v_pts = jnp.zeros((0, 3), dtype=jnp.float64)
 
-        return r_cg, R_cg, euler, v_cg, omega, r_pts, v_pts
+        return r_cg, R_cg, euler, r_joint, r_pts, v_cg, omega, v_pts
 
-    (r_cg_all, R_cg_all, euler_all, v_cg_all, omega_all,
-     r_pts_all, v_pts_all) = jax.vmap(_kin_at)(
-        jnp.asarray(sol.ys, dtype=jnp.float64)
+    (r_cg_all, R_cg_all, euler_all, r_joint_all, r_pts_all,
+     v_cg_all, omega_all, v_pts_all) = jax.vmap(_kin_at)(
+        jnp.atleast_2d(jnp.asarray(ys, dtype=jnp.float64))
     )
 
+    # Ground points are world-frame constants (may depend on points_sym only)
+    gr_records = [] if mbd.sym_points is None else mbd.sym_points.ground_points
+    if gr_records:
+        r_gr = np.stack([
+            _make_r_local_fn(rec.r_local, body_sym_list, points_sym_list)(
+                *ctx.bp_np, *ctx.pp_np
+            )
+            for rec in gr_records
+        ])
+    else:
+        r_gr = np.zeros((0, 3), dtype=float)
+
+    def _to_np(a):
+        return None if a is None else np.array(a)
+
     return KinematicsResult(
-        ts=np.array(sol.ts),
+        ts=np.atleast_1d(np.array(ts, dtype=float)),
         r_cg=np.array(r_cg_all),
         R_cg=np.array(R_cg_all),
         euler_cg=np.array(euler_all),
-        v_cg=np.array(v_cg_all),
-        omega_cg=np.array(omega_all),
+        v_cg=_to_np(v_cg_all),
+        omega_cg=_to_np(omega_all),
         r_pts=np.array(r_pts_all),
-        v_pts=np.array(v_pts_all),
+        v_pts=_to_np(v_pts_all),
         point_body_ids=tuple(body_ids_flat),
         pt_body_slices=pt_body_slices,
+        r_joint=np.array(r_joint_all),
+        r_gr=r_gr,
     )
 
 
@@ -257,6 +310,11 @@ def save_trajectory_csv(
     """
     import csv  # noqa: PLC0415
 
+    if kin.v_cg is None:
+        raise ValueError(
+            "save_trajectory_csv requires velocities; compute the kinematics "
+            "with with_velocities=True."
+        )
     n_steps, NB, _ = kin.r_cg.shape
     if body_names is None:
         body_names = [f"body{b}" for b in range(1, NB + 1)]

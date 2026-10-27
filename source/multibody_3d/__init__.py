@@ -17,6 +17,7 @@ from .multibody_core.integrator_3d import integrate_3d
 from .multibody_core.kinematics_runtime_3d import (
     KinematicsResult,
     compute_kinematics_3d,
+    compute_kinematics_states,
     save_trajectory_csv,
 )
 from .multibody_core.force_definition_3d import (
@@ -42,11 +43,7 @@ from .multibody_core.points_3d import (
     PointRecord3D,
     SymbolicPointsCache3D,
     build_points_symbolic,
-    PointsEvalResult,
-    PointsRuntimeSpec,
-    make_points_evaluator_mainint,
     sym_force_reduction_at_point,
-    force_reduction_at_point,
 )
 
 __all__ = [
@@ -68,11 +65,7 @@ __all__ = [
     "PointRecord3D",
     "SymbolicPointsCache3D",
     "build_points_symbolic",
-    "PointsEvalResult",
-    "PointsRuntimeSpec",
-    "make_points_evaluator_mainint",
     "sym_force_reduction_at_point",
-    "force_reduction_at_point",
     # Force-definition layer
     "CGForceDef",
     "PointForceDef",
@@ -92,5 +85,6 @@ __all__ = [
     # Kinematics postprocessing
     "KinematicsResult",
     "compute_kinematics_3d",
+    "compute_kinematics_states",
     "save_trajectory_csv",
 ]

@@ -33,10 +33,7 @@ from .velocity_transformation_3d import (
 from .points_3d import (
     PointRecord3D,
     SymbolicPointsCache3D,
-    PointsEvalResult,
-    PointsRuntimeSpec,
     build_points_symbolic,
-    make_points_evaluator_mainint,
 )
 from .force_definition_3d import (
     ForcesDefinition3D,
@@ -178,11 +175,6 @@ class MbdSystem3D:
     sym_points: Optional[SymbolicPointsCache3D] = field(
         init=False, repr=False, default=None,
     )
-    #: JIT-compiled points callable ``f(mainNumVars_int) -> PointsEvalResult``.
-    #: Built when ``Initial_Points`` is non-empty; ``None`` otherwise.
-    points_func: Optional[Callable] = field(init=False, repr=False, default=None)
-    #: Static layout metadata companion to ``points_func``.
-    _points_spec: Optional[object] = field(init=False, repr=False, default=None)
     #: Parsed force elements produced from :attr:`Force` by
     #: :func:`force_definition_3d.parse_force_dict`.
     #: ``None`` when :attr:`Force` is empty.
@@ -268,7 +260,7 @@ class MbdSystem3D:
             self._geom_extractor, self._slc_body_int,
         )
 
-        # Build symbolic points cache and JAX point evaluator if Initial_Points was supplied.
+        # Build symbolic points cache if Initial_Points was supplied.
         # TODO: initial points and forces defnition may have different symbolic parameters. Are both allowed?
         if self.Initial_Points:
             _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
@@ -282,18 +274,6 @@ class MbdSystem3D:
             self.sym_points = build_points_symbolic({}, _pos_cache, self.NBodies)
         else:
             _pos_cache = None
-        # Build JAX point evaluator if Initial_Points was supplied.
-        if self.sym_points is not None and self.Initial_Points:
-            self.points_func, self._points_spec = make_points_evaluator_mainint(
-                self.sym_points,
-                list(self.points_sym.values()),
-                self._numeric_params,
-                self._slc_q_int,
-                self._geom_extractor,
-                self._slc_body_int,
-                self._slc_points_int,
-                body_sym_list=list(self.body_data_sym.values()),
-            )
         # Build symbolic force cache if Force was declared.
         if self.forces_def is not None and _pos_cache is not None:
             # Build rate cache only when tension dampers need point velocities.
@@ -874,52 +854,6 @@ class MbdSystem3D:
         arr = self._validate_mainNumVars_shape(mainNumVars)
         return self.Bdot_func(self._build_mainNumVars_int(arr))
 
-    def evaluate_points(self, mainNumVars) -> "PointsEvalResult":
-        """Evaluate absolute positions and CG-relative arms for all declared points.
-
-        Accepts the same user-facing ``mainNumVars`` vector as
-        :meth:`evaluate_B` and :meth:`evaluate_Bdot`, converts it to the
-        internal representation, and delegates to the compiled
-        ``points_func`` backend.
-
-        Parameters
-        ----------
-        mainNumVars : array_like, shape ``(len(mainSymVars),)``
-            User-facing variable vector
-            ``[q_user, qd, body_params, force_params, point_params]``.
-
-        Returns
-        -------
-        PointsEvalResult
-            Named tuple with four JAX arrays:
-
-            * ``r_abs_body``   — ``(n_body_pts, 3)`` absolute positions of
-              every user-declared body-attached point (body_id ASC,
-              point_idx ASC within each body).
-            * ``rho_abs_body`` — ``(n_body_pts, 3)`` CG-relative moment arms
-              in the world frame.
-            * ``r_abs_cg``     — ``(NBodies, 3)`` absolute CG positions, one
-              row per body (1-based order).
-            * ``r_abs_gr``     — ``(n_gr, 3)`` world-frame ground-point
-              positions.
-
-        Use ``self._points_spec.pt_body_slices[body_id]`` to extract the
-        rows belonging to a specific body from ``r_abs_body`` /
-        ``rho_abs_body``.
-
-        Raises
-        ------
-        RuntimeError
-            If no ``Initial_Points`` were declared (``points_func`` is None).
-        """
-        if self.points_func is None:
-            raise RuntimeError(
-                "evaluate_points() requires Initial_Points to be declared "
-                "in the example module.  points_func is None."
-            )
-        arr = self._validate_mainNumVars_shape(mainNumVars)
-        return self.points_func(self._build_mainNumVars_int(arr))
-
     def evaluate_forces(self, mainNumVars, t: float = 0.0) -> "ForcesEvalResult":
         """Evaluate per-body 6-DOF wrenches and spring potential energy.
 
@@ -1216,14 +1150,14 @@ class MbdSystem3D:
         from .runtime_context_3d import build_runtime_context  # noqa: PLC0415
         return build_runtime_context(self, mainNumVars)
 
-    def compute_kinematics(self, sol, mainNumVars):
-        """Compute CG and declared body-point trajectories from an integrated solution.
+    def compute_kinematics(self, sol, mainNumVars, *, with_velocities: bool = True):
+        """Compute CG, joint, ground and body-point kinematics from an integrated solution.
 
         Postprocessing operation — not part of :meth:`integrate`.  Re-evaluates
         position/rate kinematics at every saved state in *sol* to recover, for
-        every body, CG translation/rotation and linear/angular velocity, plus
-        world-frame position/velocity of every point declared in
-        ``Initial_Points["BD"]``.
+        every body, CG translation/rotation and (optionally) linear/angular
+        velocity, plus the world-frame joint locations, ground points and
+        position/velocity of every point declared in ``Initial_Points["BD"]``.
 
         Unlike :meth:`compute_energy`, this does **not** require
         ``body_inertia`` to be declared — only geometry is used.
@@ -1237,15 +1171,21 @@ class MbdSystem3D:
         mainNumVars : array_like, shape ``(len(mainSymVars),)``
             The same vector passed to :meth:`integrate`; supplies the
             constant body/force/point parameter blocks.
+        with_velocities : bool, optional
+            If *False*, skip the rate kinematics; the velocity fields of the
+            result are then *None*.  Default *True*.
 
         Returns
         -------
         kinematics_runtime_3d.KinematicsResult
             ``ts``, ``r_cg``, ``R_cg``, ``euler_cg``, ``v_cg``, ``omega_cg``,
-            ``r_pts``, ``v_pts``, ``point_body_ids``, ``pt_body_slices``.
+            ``r_pts``, ``v_pts``, ``point_body_ids``, ``pt_body_slices``,
+            ``r_joint``, ``r_gr``.
         """
         from .kinematics_runtime_3d import compute_kinematics_3d  # noqa: PLC0415
-        return compute_kinematics_3d(self, sol, mainNumVars)
+        return compute_kinematics_3d(
+            self, sol, mainNumVars, with_velocities=with_velocities,
+        )
 
     def summary_table(self, precision: int = 3):
         """Print a summary table of joint information (delegates to joint_system)."""

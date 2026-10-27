@@ -2,8 +2,8 @@
 
 Persistent JAX force evaluators for 3D multibody systems.
 
-Mirrors the architecture of ``make_B_evaluator_mainint`` and
-``make_points_evaluator_mainint`` in the existing codebase.  The built
+Mirrors the architecture of ``make_B_evaluator_mainint`` in the existing
+codebase.  The built
 callable accepts a full ``mainNumVars_int`` vector (same layout as every
 other runtime evaluator in the system) and returns a :class:`ForcesEvalResult`
 with per-category per-body 6-DOF wrenches and potential energy.
@@ -22,8 +22,8 @@ Design principles
   then converted to a single JAX array (``const_vals``) that is passed into
   the JIT boundary.
 * **r_local evaluated outside JIT**: body-point local-frame coordinates may
-  depend on ``points_sym`` parameters.  They are lambdified once (same as in
-  ``make_points_evaluator_mainint``) and evaluated in numpy before calling the
+  depend on ``points_sym`` parameters.  They are lambdified once and
+  evaluated in numpy before calling the
   JIT kernel.
 * **Static-shape friendly**: every output array has shape ``(NBodies, 6)``
   regardless of which categories are present.  Absent categories return zeros.
