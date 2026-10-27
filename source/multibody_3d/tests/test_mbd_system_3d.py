@@ -90,9 +90,25 @@ class TestConstruction:
         assert isinstance(mbd.vt, VelocityTransformation3D)
 
     def test_from_example(self, data_SR):
-        fake_module = SimpleNamespace(data=data_SR, __name__="fake_example")
+        inertia = {b: {"mass": 1.0, "J": np.eye(3).tolist()} for b in (1, 2)}
+        fake_module = SimpleNamespace(data=data_SR, body_inertia=inertia, __name__="fake_example")
         mbd = MbdSystem3D.from_example(fake_module)
         assert mbd.NBodies == 2
+
+    def test_from_example_without_inertia_warns_and_uses_placeholders(self, data_SR):
+        fake_module = SimpleNamespace(data=data_SR, __name__="fake_example")
+        with pytest.warns(UserWarning, match="fake_example.*no body_inertia"):
+            mbd = MbdSystem3D.from_example(fake_module)
+        assert mbd.eom_func is not None
+        assert set(mbd.body_inertia) == {1, 2}
+        assert mbd.body_inertia[1]["mass"] == 1.0
+
+    def test_from_example_with_inertia_does_not_warn(self, data_SR, recwarn):
+        inertia = {b: {"mass": 2.0, "J": np.eye(3).tolist()} for b in (1, 2)}
+        fake_module = SimpleNamespace(data=data_SR, body_inertia=inertia, __name__="fake_example")
+        mbd = MbdSystem3D.from_example(fake_module)
+        assert not [w for w in recwarn.list if "body_inertia" in str(w.message)]
+        assert mbd.body_inertia[1]["mass"] == 2.0
 
     def test_from_example_missing_data(self):
         fake_module = SimpleNamespace(__name__="no_data_mod")

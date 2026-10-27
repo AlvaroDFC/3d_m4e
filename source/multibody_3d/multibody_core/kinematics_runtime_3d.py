@@ -226,3 +226,61 @@ def compute_kinematics_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> KinematicsRes
         point_body_ids=tuple(body_ids_flat),
         pt_body_slices=pt_body_slices,
     )
+
+
+# ---------------------------------------------------------------------------
+# CSV export
+# ---------------------------------------------------------------------------
+
+def save_trajectory_csv(
+    kin: KinematicsResult,
+    filepath,
+    *,
+    body_names=None,
+) -> None:
+    """Write CG position and linear-velocity trajectories to a CSV file.
+
+    Columns: ``time, body_index, body_name, pos_x, pos_y, pos_z,
+    vel_x, vel_y, vel_z``.  One row per (time-step, body) pair, ordered
+    by time then body index (0-based).
+
+    Parameters
+    ----------
+    kin : KinematicsResult
+        Output of :func:`compute_kinematics_3d` (or
+        :meth:`MbdSystem3D.compute_kinematics`).
+    filepath : str or path-like
+        Destination CSV file path.
+    body_names : list[str] or None, optional
+        Label for each body, length ``NBodies`` in 1-based order.
+        Defaults to ``["body1", "body2", …]`` when *None*.
+    """
+    import csv  # noqa: PLC0415
+
+    n_steps, NB, _ = kin.r_cg.shape
+    if body_names is None:
+        body_names = [f"body{b}" for b in range(1, NB + 1)]
+    if len(body_names) != NB:
+        raise ValueError(
+            f"body_names has {len(body_names)} entries but system has {NB} bodies."
+        )
+
+    with open(filepath, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "time", "body_index", "body_name",
+            "pos_x", "pos_y", "pos_z",
+            "vel_x", "vel_y", "vel_z",
+        ])
+        for i in range(n_steps):
+            t = kin.ts[i]
+            for b in range(NB):
+                px, py, pz = kin.r_cg[i, b]
+                vx, vy, vz = kin.v_cg[i, b]
+                writer.writerow([
+                    f"{t:.8f}",
+                    b,
+                    body_names[b],
+                    f"{px:.8f}", f"{py:.8f}", f"{pz:.8f}",
+                    f"{vx:.8f}", f"{vy:.8f}", f"{vz:.8f}",
+                ])

@@ -119,11 +119,11 @@ def chain_RPS():
 
 
 @pytest.fixture
-def chain_UCF():
-    """3-body chain: U -> C -> F."""
+def branch_UCF():
+    """3-body branch: ground-rooted U -> C chain plus a ground-rooted F body."""
     js = _make_system(
         n_bodies=3,
-        joints=[(0, 1), (1, 2), (2, 3)],
+        joints=[(0, 1), (1, 2), (0, 3)],
         types=["U", "C", "F"],
         p2j=[[1, 0, 0], [0, 1, 0], Z3],
         j2c=[[-1, 0, 0], [0, -1, 0], Z3],
@@ -148,7 +148,7 @@ def branch_RR():
     return VelocityTransformation3D(js)
 
 
-ALL_FIXTURE_NAMES = ["chain_RP", "chain_RPS", "chain_UCF", "branch_RR"]
+ALL_FIXTURE_NAMES = ["chain_RP", "chain_RPS", "branch_UCF", "branch_RR"]
 
 
 # ---------------------------------------------------------------------------

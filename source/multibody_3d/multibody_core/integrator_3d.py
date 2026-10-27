@@ -61,19 +61,20 @@ def _omega_matrix_jax(omega: jnp.ndarray) -> jnp.ndarray:
     ::
 
         Omega = [[ 0,  -ox, -oy, -oz],
-                 [ox,   0,   oz, -oy],
-                 [oy,  -oz,  0,   ox],
-                 [oz,   oy,  -ox, 0  ]]
+                 [ox,   0,  -oz,  oy],
+                 [oy,   oz,   0, -ox],
+                 [oz,  -oy,  ox,   0]]
 
-    Used as ``q_dot = 0.5 * Omega @ q``.
+    Used as ``q_dot = 0.5 * Omega @ q`` where *omega* is the relative
+    angular velocity expressed in the **parent** frame (left-multiplication).
     """
     ox, oy, oz = omega[0], omega[1], omega[2]
     z = jnp.zeros_like(ox)
     return jnp.stack([
         jnp.stack([ z,  -ox,  -oy,  -oz]),
-        jnp.stack([ox,    z,   oz,  -oy]),
-        jnp.stack([oy,  -oz,    z,   ox]),
-        jnp.stack([oz,   oy,  -ox,    z]),
+        jnp.stack([ox,    z,  -oz,   oy]),
+        jnp.stack([oy,   oz,    z,  -ox]),
+        jnp.stack([oz,  -oy,   ox,    z]),
     ])
 
 
@@ -264,6 +265,7 @@ def integrate_3d(
     atol:      float = 1e-8,
     algorithm: str   = "Dopri5",
     max_steps: int   = 100_000,
+    dtmax:     float = None,
 ):
     """Numerically integrate the 3D multibody equations of motion via diffrax.
 
@@ -294,6 +296,13 @@ def integrate_3d(
         * ``"Kvaerno3"`` / ``"Kvaerno5"`` — implicit, for stiff systems
     max_steps : int
         Maximum number of internal solver steps (default 100 000).
+    dtmax : float or None
+        Hard upper bound on the adaptive step size.  When *None* (default)
+        the PID controller is uncapped and may grow steps far beyond the
+        output spacing ``dt``, which can cause visible energy drift for
+        smooth conservative systems.  Setting ``dtmax <= dt`` ensures at
+        least ``T/dtmax`` steps and typically reduces energy drift to
+        negligible levels.
 
     Returns
     -------
@@ -352,7 +361,7 @@ def integrate_3d(
         print(f"Unknown algorithm '{algorithm}'; falling back to Dopri5.")
     solver = _SOLVERS.get(algorithm, _SOLVERS["Dopri5"])()
 
-    controller = diffrax.PIDController(rtol=rtol, atol=atol)
+    controller = diffrax.PIDController(rtol=rtol, atol=atol, dtmax=dtmax)
     dt0        = float(dt) if dt is not None else (t1_span - t0_span) * 0.01
 
     if dt is not None:

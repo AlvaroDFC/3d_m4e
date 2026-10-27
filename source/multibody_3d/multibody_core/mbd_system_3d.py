@@ -11,6 +11,7 @@ Not included: EOM assembly, numerical integration.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Callable, Optional
@@ -251,21 +252,6 @@ class MbdSystem3D:
                             list(self.force_points_sym.values()) +
                             list(self.points_sym.values()))
         self._build_slice_metadata()
-        # Build symbolic points cache and JAX point evaluator if Initial_Points was supplied.
-        # TODO: initial points and forces defnition may have different symbolic parameters. Are both allowed?
-        if self.Initial_Points:
-            _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
-            self.sym_points = build_points_symbolic(
-                self.Initial_Points, _pos_cache, self.NBodies,
-            )
-        elif self.forces_def is not None or self.body_inertia:
-            # No Initial_Points, but Force or body_inertia is declared:
-            # build pos_cache for torsion axes / world-frame inertia;
-            # sym_points gets only CG records.
-            _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
-            self.sym_points = build_points_symbolic({}, _pos_cache, self.NBodies)
-        else:
-            _pos_cache = None
         # Build runtime state once: frozen geometry params + JIT-compiled evaluators.
         self._numeric_params = self.vt.build_numeric_params()
         self._geom_extractor = self.vt.build_geometry_extractor(
@@ -289,9 +275,9 @@ class MbdSystem3D:
             self.sym_points = build_points_symbolic(
                 self.Initial_Points, _pos_cache, self.NBodies,
             )
-        elif self.forces_def is not None:
-            # No Initial_Points, but Force is declared: build pos_cache
-            # for torsion axes; sym_points gets only CG records.
+        elif self.forces_def is not None or self.body_inertia:
+            # No Initial_Points, but Force or body_inertia is declared: build pos_cache
+            # for torsion axes / world-frame inertia; sym_points gets only CG records.
             _pos_cache = self.vt.build_cache_symbolic(self.coords.q_int)
             self.sym_points = build_points_symbolic({}, _pos_cache, self.NBodies)
         else:
@@ -648,6 +634,20 @@ class MbdSystem3D:
         fp_sym  = getattr(ex, "force_points_sym", {})
         f_sym   = getattr(ex, "force_sym", {})
         merged_force_sym = {**fp_sym, **f_sym}
+        body_inertia = getattr(ex, "body_inertia", None)
+        if not body_inertia:
+            n_bodies = len(ex.data["joints"])
+            warnings.warn(
+                f"Example '{ex.__name__}' defines no body_inertia; using mass 1.0 kg and "
+                f"inertia 0.01*I for each of its {n_bodies} bodies. Define body_inertia "
+                f"in the example to silence this warning.",
+                UserWarning,
+                stacklevel=2,
+            )
+            body_inertia = {
+                b: {"mass": 1.0, "J": (0.01 * np.eye(3)).tolist()}
+                for b in range(1, n_bodies + 1)
+            }
         return cls(
             data=ex.data,
             body_data_sym=getattr(ex, "body_data_sym", {}),
@@ -655,7 +655,7 @@ class MbdSystem3D:
             points_sym=getattr(ex, "points_sym", {}),
             Initial_Points=getattr(ex, "Initial_Points", {}),
             Force=getattr(ex, "Force", {}),
-            body_inertia=getattr(ex, "body_inertia", {}),
+            body_inertia=body_inertia,
         )
 
     # ── Topology / sizing properties ─────────────────────────────────────────
@@ -1115,10 +1115,11 @@ class MbdSystem3D:
         *,
         tspan,
         dt=None,
-        rtol: float = 1e-6,
-        atol: float = 1e-6,
-        algorithm: str = "Dopri5",
-        max_steps: int = 500_000,
+        rtol: float = 1e-12,
+        atol: float = 1e-12,
+        algorithm: str = "Dopri8",
+        max_steps: int = 2_000_000,
+        dtmax: float = None,
     ):
         """Numerically integrate the equations of motion.
 
@@ -1140,6 +1141,11 @@ class MbdSystem3D:
             Diffrax solver name (``"Dopri5"``, ``"Dopri8"``, ``"Tsit5"``, …).
         max_steps : int
             Maximum number of internal solver steps before raising an error.
+        dtmax : float or None
+            Hard upper bound on the adaptive step size.  Set to a value
+            ``<= dt`` to cap internal steps and prevent energy drift in
+            smooth conservative systems.  *None* (default) leaves the PID
+            controller uncapped.
 
         Returns
         -------
@@ -1155,6 +1161,7 @@ class MbdSystem3D:
             rtol=rtol, atol=atol,
             algorithm=algorithm,
             max_steps=max_steps,
+            dtmax=dtmax,
         )
 
     def compute_energy(self, sol, mainNumVars):
@@ -1162,8 +1169,9 @@ class MbdSystem3D:
 
         Postprocessing operation — not part of :meth:`integrate`.  Re-evaluates
         ``eom_func`` and position kinematics at every saved state in *sol* to
-        recover generalised mass and CG positions, combined with gravity to
-        give per-step, per-body mechanical energy.
+        recover generalised mass and CG positions. System potential energy
+        includes gravity and springs; per-body potential energy includes
+        gravity only, without allocating spring energy between bodies.
 
         Delegates to :func:`mass_runtime_3d.compute_energy_3d`.  The system
         must have ``body_inertia`` declared so that ``eom_func`` is compiled.

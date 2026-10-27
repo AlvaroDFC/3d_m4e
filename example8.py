@@ -31,6 +31,7 @@
 #   force_sym = {'k': k, 'L0': L0}
 # ─────────────────────────────────────────────────────────────────────────────
 
+import numpy as np
 import sympy as sym
 # Dimensions using symbolic variables for later substitution:
 R, L = sym.symbols("R L", real=True)
@@ -123,3 +124,22 @@ Force = {
         1: {"force": [Fx1, Fy1, Fz1]},
     },
 }
+
+# Placeholder mass [kg] and isotropic inertia [kg·m²] for every body; replace with real values.
+body_inertia = {b: {"mass": 1.0, "J": (0.01 * np.eye(3)).tolist()} for b in range(1, 5)}
+
+# ── Initial conditions and numerical parameters ───────────────────────────────
+# F (euler): 6 | S (euler): 3 | R: 1 | R: 1.  Same state as the SEA-Stack validation run.
+q_user_np = np.zeros(11)
+qd_np     = np.array([0.0, 0.0, 0.0, 0.05, 0.0, 0.05, 0.1, 0.05, -0.05, 0.15, 0.1])
+
+# Values follow the order of body_data_sym, force_sym and points_sym.
+body_params   = np.array([0.5, 1.0])         # R, L
+force_params  = np.array([1.0, 1.0, 1.0])    # Fx1, Fy1, Fz1
+points_params = np.array([0.3])              # d4
+
+# ── Simulation ─────────────────────────────────────
+tspan             = 10.0
+TimeStep          = 0.05
+integrator_kwargs = {"rtol": 1e-12, "atol": 1e-12, "algorithm": "Dopri8",
+                     "max_steps": 10_000_000, "dtmax": 0.01}

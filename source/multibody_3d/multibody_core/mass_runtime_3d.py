@@ -105,9 +105,11 @@ class EnergyResult(NamedTuple):
     ts : ndarray, shape ``(n_steps,)``
         Time points; mirrors ``sol.ts``.
     KE, PE, E_total : ndarray, shape ``(n_steps,)``
-        System-level kinetic, potential, and total mechanical energy.
+        System-level kinetic, potential (gravity plus springs), and total
+        mechanical energy.
     KE_body, PE_body : ndarray, shape ``(n_steps, NBodies)``
-        Per-body kinetic and potential energy.
+        Per-body kinetic and gravitational potential energy. Spring energy
+        belongs to the system and is not allocated to individual bodies.
     """
     ts:      "np.ndarray"
     KE:      "np.ndarray"
@@ -371,7 +373,8 @@ def compute_energy_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> EnergyResult:
     This is a postprocessing operation, not part of the ODE right-hand side:
     it re-evaluates ``mbd.eom_func`` and the position kinematics at every
     saved state in *sol* to recover generalised mass and CG positions, then
-    combines them with gravity to obtain per-step, per-body mechanical energy.
+    combines them with gravity and spring potential energy. Per-body potential
+    energy remains gravitational only; system potential energy includes springs.
 
     Parameters
     ----------
@@ -426,9 +429,13 @@ def compute_energy_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> EnergyResult:
     # ── Per-body weight = g_app * mass, ordered by body id ──────────────────
     masses_np   = np.array([mbd.body_inertia[b]["mass"] for b in range(1, NB + 1)])
     weights_jax = jnp.asarray(g_app_np * masses_np, dtype=jnp.float64)
+    has_springs = bool(
+        mbd.forces_def is not None
+        and (mbd.forces_def.tension_springs or mbd.forces_def.torsion_springs)
+    )
 
     @jax.jit
-    def _energy_at(y):
+    def _energy_at(y, t):
         q_int = y[:n_qi]
         qd    = y[n_qi:]
         # Kinetic energy: T = ½ qd^T M(q) qd  (M = B^T M_body B)
@@ -440,6 +447,8 @@ def compute_energy_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> EnergyResult:
         _, r_abs, _, _, _ = build_cache_jax(q_int, **ctx.pos_cache_kwargs)
         r_cg = jnp.stack([r_abs[b + 1].ravel() for b in range(NB)])  # (NB, 3)
         PE   = -jnp.dot(weights_jax, r_cg @ g_vec_jax)
+        if has_springs:
+            PE = PE + ctx.forces_e(mainint_y, t).spring_potential_energy
         # Per-body energies
         B      = eom_res.B       # (6*NB, total_dof)
         M_body = eom_res.M_body  # (6*NB, 6*NB)
@@ -451,7 +460,8 @@ def compute_energy_3d(mbd: "MbdSystem3D", sol, mainNumVars) -> EnergyResult:
         return KE, PE, KE_b, PE_b
 
     KE_arr, PE_arr, KE_body, PE_body = jax.vmap(_energy_at)(
-        jnp.asarray(sol.ys, dtype=jnp.float64)
+        jnp.asarray(sol.ys, dtype=jnp.float64),
+        jnp.asarray(sol.ts, dtype=jnp.float64),
     )
     KE_arr  = np.array(KE_arr)
     PE_arr  = np.array(PE_arr)

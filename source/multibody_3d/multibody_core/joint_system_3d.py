@@ -105,6 +105,33 @@ def _axes_noncollinear(u1: sym.Matrix, u2: sym.Matrix, *, ctx: str) -> None:
         raise ValueError(f"{ctx}: universal axes are collinear (u1 x u2 == 0). Provide non-collinear axes.")
 
 
+def _axes_orthogonal(u1: sym.Matrix, u2: sym.Matrix, *, ctx: str, tol: float = 1e-6) -> None:
+    """Validate u1 and u2 (unit vectors) are mutually orthogonal (dot == 0).
+
+    The 'U' joint kinematics rotates axis_u2 through the axis_u1 rotation
+    (see VelocityTransformation3D.build_cache_symbolic, code == "U"), which
+    is the standard cross/Cardan-joint formulation: axis_u1 and axis_u2 are
+    the two pin axes of a rigid cross and must be perpendicular for this to
+    correspond to a physically valid universal joint.
+    """
+    d = sym.simplify(sym.Matrix(u1).dot(sym.Matrix(u2)))
+    try:
+        d_num = float(d)
+    except TypeError:
+        # Unresolved symbolic parameters: require exact algebraic orthogonality.
+        if d != 0:
+            raise ValueError(
+                f"{ctx}: universal joint axes must be orthogonal (axis_u1 . axis_u2 == 0), "
+                f"got symbolic dot product {d}."
+            )
+        return
+    if abs(d_num) > tol:
+        raise ValueError(
+            f"{ctx}: universal joint axes must be orthogonal (axis_u1 . axis_u2 == 0), "
+            f"got dot(axis_u1, axis_u2) = {d_num:.3e} (tol={tol:.1e})."
+        )
+
+
 # --------------- Euler / Quaternion conversion utilities ---------------
 
 def euler_to_quat(phi: float, theta: float, psi: float) -> np.ndarray:
@@ -247,7 +274,8 @@ class Joint3D:
 
         Notes:
         - Axis vectors are defined in the PARENT frame.
-        - For U joints: u1 and u2 must be non-collinear (orthonormal preferred).
+        - For U joints: u1 and u2 must be non-collinear AND orthogonal
+          (a universal/Cardan joint's cross has two perpendicular pins).
         """
         if not (0 <= self.parent <= NBodies):
             raise ValueError(
@@ -261,6 +289,12 @@ class Joint3D:
             raise ValueError(f"Joint(child={self.child}): self-parenting detected (parent==child).")
 
         # axis requirements
+        if self.type == JointType.FLOATING and self.parent != 0:
+            raise ValueError(
+                f"Joint(child={self.child}, type=F): floating joints must connect "
+                f"ground (parent=0) to a body; got parent={self.parent}."
+            )
+
         if self.type in (JointType.REVOLUTE, JointType.PRISMATIC, JointType.CYLINDRICAL):
             if self._u is None:
                 raise ValueError(f"Joint(child={self.child}, type={self.type.value}): axis_u is required.")
@@ -268,6 +302,7 @@ class Joint3D:
             if self._u1 is None or self._u2 is None:
                 raise ValueError(f"Joint(child={self.child}, type=U): axis_u1 and axis_u2 are required.")
             _axes_noncollinear(self._u1, self._u2, ctx=f"Joint(child={self.child}, type=U)")
+            _axes_orthogonal(self._u1, self._u2, ctx=f"Joint(child={self.child}, type=U)")
 
         # rot_param validation for S/F
         if self.type in (JointType.SPHERICAL, JointType.FLOATING):

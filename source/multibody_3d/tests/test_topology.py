@@ -37,6 +37,19 @@ def test_valid_small_tree_double_pendulum():
     assert sys.Btrack[2, 1] == True
 
 
+def test_floating_joint_must_connect_to_ground():
+    data = {
+        "NBodies": 2,
+        "joints": [(0, 1), (1, 2)],
+        "types": ["R", "F"],
+        "parent_cg_to_joint": [[0, 0, 0], [0, 0, 0]],
+        "joint_to_child_cg": [[0, 0, 0], [0, 0, 0]],
+        "axis_u": [[0, 0, 1], None],
+    }
+    with pytest.raises(ValueError, match="floating joints must connect ground"):
+        JointSystem3D.from_data(data)
+
+
 def test_invalid_duplicate_child():
     data = {
         "NBodies": 2,

@@ -1,4 +1,5 @@
 # Example 9 - Define a simple double pendulum system
+import numpy as np
 import sympy as sym
 
 L = 1.0 # Length of the main rotor blades
@@ -16,14 +17,22 @@ data = {
 
 t = sym.symbols("t", real=True)
 
+Initial_Points = {
+    "GR": [],
+    "BD": {1: [[0.0, 0.0, 0.0]], 2: [[0.0, 0.0, 0.0]]},
+}
+
 Force = {
     "Gravity": {
         "g_vec": [0, 0, -9.81],
         "g_app": [1, 1]
     },
-    "CG": {
-        1: {"force": [100*sym.sin(t),0,0]}
-    }
+    "TensionSpring": [(1, 0, 2, 0, 4.0, 1.2)],
+    "TorsionSpring": [(1, 0.6, 0.0)],
+    # ,
+    # "CG": {
+    #     1: {"force": [0*sym.sin(t),0,0]}
+    # }
 }
 
 # Per-body masses [kg] and body-frame inertia tensors [kg·m²].
@@ -42,3 +51,21 @@ body_inertia = {
               [0.33,  0.,    0.01 ]],
     },
 }
+
+# ── Initial conditions and numerical parameters ───────────────────────────────
+q_user_np = np.array([0.0, 0.0])
+qd_np     = np.array([0.0, 1.0])
+
+body_data_sym = {}
+force_sym     = {}
+points_sym    = {}
+
+body_params   = np.ones(len(body_data_sym))
+force_params  = np.ones(len(force_sym))
+points_params = np.ones(len(points_sym))
+
+# ── Simulation ─────────────────────────────────────
+tspan             = 10.0
+TimeStep          = 0.05
+integrator_kwargs = {"rtol": 1e-12, "atol": 1e-12, "algorithm": "Dopri8",
+                     "max_steps": 10_000_000, "dtmax": 0.01}
