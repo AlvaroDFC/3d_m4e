@@ -38,6 +38,7 @@ from .multibody_core.forces_symbolic_3d import (
 from .multibody_core.forces_runtime_3d import (
     ForcesEvalResult,
     make_forces_evaluator_mainint,
+    compute_forces_states,
 )
 from .multibody_core.points_3d import (
     PointRecord3D,
@@ -82,6 +83,7 @@ __all__ = [
     # JAX force runtime layer
     "ForcesEvalResult",
     "make_forces_evaluator_mainint",
+    "compute_forces_states",
     # Kinematics postprocessing
     "KinematicsResult",
     "compute_kinematics_3d",

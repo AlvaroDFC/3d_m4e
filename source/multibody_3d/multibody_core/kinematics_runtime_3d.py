@@ -241,31 +241,6 @@ def _get_kernel(mbd: "MbdSystem3D", mainNumVars, with_velocities: bool) -> _KinK
     return kern
 
 
-def _as_internal_states(mbd: "MbdSystem3D", ys, with_velocities: bool) -> "np.ndarray":
-    """Return state rows in the internal layout, mapping from the user layout if needed."""
-    ys = np.atleast_2d(np.asarray(ys, dtype=float))
-    n_qi, n_qu, n_qd = mbd.total_cfg_dof, mbd.total_user_dof, mbd.total_dof
-    width = ys.shape[1]
-
-    if width in (n_qi, n_qi + n_qd):
-        out = ys   # also the user layout when no Euler S/F joint is present
-    elif width in (n_qu, n_qu + n_qd):
-        q_int = np.stack([mbd.map_q_user_to_q_int(row[:n_qu]) for row in ys])
-        out   = np.hstack([q_int, ys[:, n_qu:]])
-    else:
-        raise ValueError(
-            f"State width {width} not recognised: expected [q_int, qd] ({n_qi + n_qd}) "
-            f"or [q_user, qd] ({n_qu + n_qd}); without velocities also q_int ({n_qi}) "
-            f"or q_user ({n_qu})."
-        )
-    if with_velocities and out.shape[1] != n_qi + n_qd:
-        raise ValueError(
-            f"with_velocities=True needs the qd columns (width {n_qi + n_qd} or "
-            f"{n_qu + n_qd}); got {width}."
-        )
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -318,8 +293,13 @@ def compute_kinematics_states(
     -------
     KinematicsResult
     """
+    try:
+        from .runtime_context_3d import as_internal_states   # noqa: PLC0415
+    except Exception:  # pragma: no cover
+        from runtime_context_3d import as_internal_states
+
     ts = np.atleast_1d(np.array(ts, dtype=float))
-    ys = _as_internal_states(mbd, ys, with_velocities)
+    ys = as_internal_states(mbd, ys, with_velocities)
     if ts.shape[0] != ys.shape[0]:
         raise ValueError(f"ts has {ts.shape[0]} entries but ys has {ys.shape[0]} rows.")
 
