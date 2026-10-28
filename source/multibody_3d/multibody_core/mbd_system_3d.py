@@ -210,6 +210,11 @@ class MbdSystem3D:
     eom_func: Optional[Callable] = field(
         init=False, repr=False, default=None,
     )
+    #: Memoized postprocessing kernels / lambdified evaluators (internal use,
+    #: see ``kinematics_runtime_3d``).
+    _runtime_cache: dict = field(
+        init=False, repr=False, compare=False, default_factory=dict,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.data, dict):

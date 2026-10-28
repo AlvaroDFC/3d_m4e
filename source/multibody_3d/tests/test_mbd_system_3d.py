@@ -864,3 +864,145 @@ class TestSymbolicPoints:
         f_vec = sym.Matrix([0, 0, 1])
         _, m_eq = mbd.sym_force_reduction_at_point(rec, f_vec)
         assert a in m_eq.free_symbols
+
+
+# ---------------------------------------------------------------------------
+# compute_kinematics_states: state layouts and kernel / evaluator caching
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def data_S_euler():
+    """1-body spherical joint with Euler user coordinates (3 user -> 4 internal)."""
+    return {
+        "NBodies": 1,
+        "joints": [(0, 1)],
+        "types": ["S"],
+        "parent_cg_to_joint": [Z3],
+        "joint_to_child_cg": [[0.5, 0.0, 0.0]],
+        "axis_u": [None],
+        "axis_u1": [None],
+        "axis_u2": [None],
+    }
+
+
+class TestKinematicsStateLayouts:
+    """User- and internal-layout state rows are both accepted."""
+
+    Q_USER = np.array([0.3, -0.2, 0.5])
+
+    @staticmethod
+    def _kin(mbd, ys, mnv, **kw):
+        from multibody_3d import compute_kinematics_states
+        return compute_kinematics_states(mbd, [0.0], ys, mnv, **kw)
+
+    def test_user_rows_match_mapped_internal_rows(self, data_S_euler):
+        mbd = MbdSystem3D(data_S_euler)
+        mnv = np.zeros(mbd.total_user_dof + mbd.total_dof)
+        qd0 = np.zeros(mbd.total_dof)
+        q_int = mbd.map_q_user_to_q_int(self.Q_USER)
+
+        k_int  = self._kin(mbd, np.hstack([q_int, qd0])[None, :], mnv)
+        k_user = self._kin(mbd, np.hstack([self.Q_USER, qd0])[None, :], mnv)
+
+        np.testing.assert_allclose(k_user.r_cg, k_int.r_cg, atol=1e-12)
+        np.testing.assert_allclose(k_user.R_cg, k_int.R_cg, atol=1e-12)
+        assert not np.allclose(k_user.R_cg[0, 0], np.eye(3))   # the mapping was applied
+
+    def test_q_only_rows_need_velocities_off(self, data_S_euler):
+        mbd = MbdSystem3D(data_S_euler)
+        mnv = np.zeros(mbd.total_user_dof + mbd.total_dof)
+        q_int = mbd.map_q_user_to_q_int(self.Q_USER)
+        ref = self._kin(mbd, np.hstack([q_int, np.zeros(mbd.total_dof)])[None, :], mnv)
+
+        for q_rows in (self.Q_USER, q_int):
+            kin = self._kin(mbd, q_rows[None, :], mnv, with_velocities=False)
+            np.testing.assert_allclose(kin.R_cg, ref.R_cg, atol=1e-12)
+            assert kin.v_cg is None
+            with pytest.raises(ValueError, match="qd"):
+                self._kin(mbd, q_rows[None, :], mnv)
+
+    def test_unrecognised_width_raises(self, data_S_euler):
+        mbd = MbdSystem3D(data_S_euler)
+        mnv = np.zeros(mbd.total_user_dof + mbd.total_dof)
+        with pytest.raises(ValueError, match="width"):
+            self._kin(mbd, np.zeros((1, 5)), mnv)
+
+    def test_ts_ys_length_mismatch_raises(self, data_S_euler):
+        from multibody_3d import compute_kinematics_states
+        mbd = MbdSystem3D(data_S_euler)
+        mnv = np.zeros(mbd.total_user_dof + mbd.total_dof)
+        with pytest.raises(ValueError, match="rows"):
+            compute_kinematics_states(mbd, [0.0, 1.0], np.zeros((1, 7)), mnv)
+
+    def test_layouts_coincide_without_euler_joints(self, mbd_with_points):
+        """Revolute-only system: q-only rows are valid in both layouts."""
+        mbd, _ = mbd_with_points
+        mnv = np.array([0.0, 0.0, 1.5])
+        kin = self._kin(mbd, np.array([[0.4]]), mnv, with_velocities=False)
+        full = self._kin(mbd, np.array([[0.4, 0.0]]), mnv)
+        np.testing.assert_allclose(kin.r_pts, full.r_pts, atol=1e-12)
+
+
+class TestKinematicsCache:
+    """The jitted kernel and the lambdified point evaluators are reused across calls."""
+
+    @staticmethod
+    def _run(mbd, a_val=1.5, **kw):
+        from multibody_3d import compute_kinematics_states
+        return compute_kinematics_states(
+            mbd, [0.0], [[0.0, 0.0]], np.array([0.0, 0.0, a_val]), **kw,
+        )
+
+    @staticmethod
+    def _count_calls(monkeypatch, module, name):
+        real, calls = getattr(module, name), []
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, counting)
+        return calls
+
+    def test_kernel_traced_once_for_repeated_calls(self, mbd_with_points, monkeypatch):
+        from multibody_3d.multibody_core import velocity_transformation_3d as vt
+        traces = self._count_calls(monkeypatch, vt, "build_cache_jax")
+        mbd, _ = mbd_with_points
+        self._run(mbd)
+        self._run(mbd)
+        assert len(traces) == 1
+
+    def test_kernel_rebuilt_only_when_parameters_change(self, mbd_with_points, monkeypatch):
+        from multibody_3d.multibody_core import velocity_transformation_3d as vt
+        traces = self._count_calls(monkeypatch, vt, "build_cache_jax")
+        mbd, _ = mbd_with_points
+        self._run(mbd, 1.5)
+        self._run(mbd, 3.0)
+        self._run(mbd, 3.0)
+        assert len(traces) == 2
+
+    def test_velocity_variants_do_not_evict_each_other(self, mbd_with_points, monkeypatch):
+        from multibody_3d.multibody_core import velocity_transformation_3d as vt
+        traces = self._count_calls(monkeypatch, vt, "build_cache_jax")
+        mbd, _ = mbd_with_points
+        for with_velocities in (True, False, True, False):
+            self._run(mbd, with_velocities=with_velocities)
+        assert len(traces) == 2
+
+    def test_point_evaluators_lambdified_once(self, mbd_with_points, monkeypatch):
+        from multibody_3d.multibody_core import points_3d
+        built = self._count_calls(monkeypatch, points_3d, "_make_r_local_fn")
+        mbd, _ = mbd_with_points
+        self._run(mbd, 1.5)
+        self._run(mbd, 3.0)
+        self._run(mbd, 3.0, with_velocities=False)
+        assert len(built) == 2   # one body point + one ground point
+
+    def test_results_do_not_alias_the_cache(self, mbd_with_points):
+        mbd, _ = mbd_with_points
+        kin = self._run(mbd)
+        kin.r_gr[:] = 99.0
+        kin.pt_body_slices.clear()
+        again = self._run(mbd)
+        np.testing.assert_allclose(again.r_gr, 0.0)
+        assert again.pt_body_slices == {1: slice(0, 1)}
