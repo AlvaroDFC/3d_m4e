@@ -112,15 +112,15 @@ from multibody_3d import plotting as plot
 
 plot.plot_coordinates(sol, n_qi, mbd.coords.names_int, mbd.coords.names_d)
 
-# energy = mbd.compute_energy(sol, mainNumVars)
-# plot.print_system_energy(energy)
-# print(f"Internal steps used  : {int(sol.stats['num_steps'])}")
-# plot.plot_system_energy(energy)
-# plot.plot_body_energy(energy)
+energy = mbd.compute_energy(sol, mainNumVars)
+plot.print_system_energy(energy)
+print(f"Internal steps used  : {int(sol.stats['num_steps'])}")
+plot.plot_system_energy(energy)
+plot.plot_body_energy(energy)
 
 kin = mbd.compute_kinematics(sol, mainNumVars)
-# plot.plot_body_velocities(kin)
-# plot.plot_body_trajectories(kin)
+plot.plot_body_velocities(kin)
+plot.plot_body_trajectories(kin)
 
 # 3-D snapshot and animation; keep `anim` referenced while the window is open
 from multibody_3d import compute_forces_states

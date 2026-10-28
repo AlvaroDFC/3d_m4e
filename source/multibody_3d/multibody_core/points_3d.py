@@ -303,6 +303,32 @@ def sym_force_reduction_at_point(
     return f_col, m_eq
 
 
+def _get_point_record(
+    body_id: int, pt_idx: int, sym_points: SymbolicPointsCache3D, label: str,
+) -> PointRecord3D:
+    """Look up a declared point by body id (0 = ground) and 0-based index."""
+    if body_id == 0:
+        pts = sym_points.ground_points
+        if pt_idx >= len(pts):
+            raise ValueError(
+                f"{label}: ground point index {pt_idx} is out of range "
+                f"(only {len(pts)} ground point(s) declared)."
+            )
+        return pts[pt_idx]
+    if body_id not in sym_points.body_points:
+        raise ValueError(
+            f"{label}: body {body_id} has no declared points "
+            "in Initial_Points[\"BD\"]."
+        )
+    pts = sym_points.body_points[body_id]
+    if pt_idx >= len(pts):
+        raise ValueError(
+            f"{label}: body {body_id} has only {len(pts)} point(s); "
+            f"pt_idx={pt_idx} is out of range."
+        )
+    return pts[pt_idx]
+
+
 # does this make sense from the AD stand point? --> To separate sympy scope from JAX scope it does
 def _make_r_local_fn(r_local_sym: "sym.Matrix", body_sym_list: list, points_sym_list: list):
     """Return a callable ``fn(*body_sym_vals, *point_sym_vals) -> np.ndarray(3,)``.

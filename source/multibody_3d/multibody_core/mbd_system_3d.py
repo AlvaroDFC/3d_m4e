@@ -31,18 +31,11 @@ from .velocity_transformation_3d import (
     make_Bdot_evaluator_mainint,
 )
 from .points_3d import (
-    PointRecord3D,
     SymbolicPointsCache3D,
     build_points_symbolic,
 )
 from .force_definition_3d import (
     ForcesDefinition3D,
-    CGForceDef,
-    PointForceDef,
-    TensionSpringDef,
-    TensionDamperDef,
-    TorsionSpringDef,
-    TorsionDamperDef,
     parse_force_dict,
     is_time_symbol,
 )
@@ -103,10 +96,9 @@ class MbdSystem3D:
       evaluations.  Accepts ``mainNumVars_int`` and returns a
       :class:`~forces_runtime_3d.ForcesEvalResult`.
 
-    * **Total forces** are exposed via
-      :meth:`evaluate_forces` (returns the full per-category result) and
-      :meth:`evaluate_total_wrench` (returns only the ``(NBodies, 6)``
-      sum). The symbolic total is available via :attr:`sym_total_wrench`.
+    * **Total forces** are exposed via :meth:`evaluate_forces` (the ``total``
+      field of the result holds the ``(NBodies, 6)`` sum). The symbolic total
+      is available via :attr:`sym_total_wrench`.
 
     All setup is fully automatic in ``__post_init__``; no user calls are
     needed beyond constructing the object or calling
@@ -859,7 +851,9 @@ class MbdSystem3D:
         arr = self._validate_mainNumVars_shape(mainNumVars)
         return self.Bdot_func(self._build_mainNumVars_int(arr))
 
-    def evaluate_forces(self, mainNumVars, t: float = 0.0) -> "ForcesEvalResult":
+    def evaluate_forces(
+        self, mainNumVars, t: Optional[float] = None,
+    ) -> "ForcesEvalResult":
         """Evaluate per-body 6-DOF wrenches and spring potential energy.
 
         Accepts the same user-facing ``mainNumVars`` vector as
@@ -872,7 +866,7 @@ class MbdSystem3D:
             User-facing variable vector
             ``[q_user, qd, body_params, force_params, point_params]``.
         t : float, optional
-            Simulation time.  Only relevant when the declared forces
+            Simulation time.  Required when the declared forces
             reference the reserved time symbol (``force_definition_3d.T_SYM``,
             ``forces_def.is_time_dependent``); ignored otherwise.  During
             :meth:`integrate`, this is supplied automatically at every
@@ -892,12 +886,22 @@ class MbdSystem3D:
         ------
         RuntimeError
             If no ``Force`` dictionary was declared (``forces_func`` is None).
+        ValueError
+            If the declared forces are time-dependent and *t* is omitted.
         """
         if self.forces_func is None:
             raise RuntimeError(
                 "evaluate_forces() requires a Force dictionary to be declared "
                 "in the example module.  forces_func is None."
             )
+        if t is None:
+            if self.forces_def.is_time_dependent:
+                raise ValueError(
+                    "evaluate_forces(): the declared forces depend on time "
+                    "(reserved symbol 't'); pass the evaluation time, "
+                    "e.g. evaluate_forces(mainNumVars, t=0.0)."
+                )
+            t = 0.0
         arr = self._validate_mainNumVars_shape(mainNumVars)
         return self.forces_func(self._build_mainNumVars_int(arr), t)
 
@@ -960,69 +964,6 @@ class MbdSystem3D:
             )
         arr = self._validate_mainNumVars_shape(mainNumVars)
         return self.eom_func(self._build_mainNumVars_int(arr))
-
-    def evaluate_generalized_forces(self, mainNumVars):
-        """Evaluate the generalised force vector Q_gen = B^T f_wrench.
-
-        Combines :meth:`evaluate_B` and :meth:`evaluate_total_wrench`
-        into the generalised force vector used on the right-hand side of
-        the equations of motion::
-
-            M(q) q̈ = Q_gen(q, q̇)
-
-        Parameters
-        ----------
-        mainNumVars : array_like, shape ``(len(mainSymVars),)``
-            User-facing variable vector
-            ``[q_user, qd, body_params, force_params, point_params]``.
-
-        Returns
-        -------
-        jnp.ndarray, shape ``(total_dof,)``
-            Generalised force vector.
-
-        Raises
-        ------
-        RuntimeError
-            If no ``Force`` dictionary was declared (``forces_func`` is None).
-        """
-        if self.forces_func is None:
-            raise RuntimeError(
-                "evaluate_generalized_forces() requires a Force dictionary to "
-                "be declared.  forces_func is None."
-            )
-        arr     = self._validate_mainNumVars_shape(mainNumVars)
-        mnv_int = self._build_mainNumVars_int(arr)
-        B       = self.B_func(mnv_int)              # (6*NBodies, total_dof)
-        f_total = self.forces_func(mnv_int).total   # (NBodies, 6)
-        return B.T @ f_total.ravel()                # (total_dof,)
-
-    def evaluate_total_wrench(self, mainNumVars):
-        """Evaluate the total (summed) per-body wrench array.
-
-        Convenience wrapper around :meth:`evaluate_forces` that returns only
-        the ``total`` field — the ``(NBodies, 6)`` JAX array of
-        world-frame ``[Fx, Fy, Fz, Mx, My, Mz]`` contributions from **all**
-        active force categories combined.  Intended for downstream RHS
-        construction where only the net wrench is needed.
-
-        Parameters
-        ----------
-        mainNumVars : array_like, shape ``(len(mainSymVars),)``
-            User-facing variable vector
-            ``[q_user, qd, body_params, force_params, point_params]``.
-
-        Returns
-        -------
-        jnp.ndarray, shape ``(NBodies, 6)``
-            Net world-frame wrench on each body (force then moment about CG).
-
-        Raises
-        ------
-        RuntimeError
-            If no ``Force`` dictionary was declared (``forces_func`` is None).
-        """
-        return self.evaluate_forces(mainNumVars).total
 
     def sym_force_reduction_at_point(self, rec, force_vec):
         """Reduce a symbolic force at a body point to force + moment about CG.

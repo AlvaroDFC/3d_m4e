@@ -47,7 +47,7 @@ const_vals layout (per element, in declaration order)
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 import sympy as sym
@@ -65,11 +65,11 @@ if not _JAX_AVAILABLE:
 
 try:
     from .force_definition_3d import ForcesDefinition3D, is_time_symbol
-    from .points_3d import SymbolicPointsCache3D, PointRecord3D, _make_r_local_fn
+    from .points_3d import SymbolicPointsCache3D, _get_point_record, _make_r_local_fn
     from .joint_coordinate_3d import CoordBundle
 except Exception:  # pragma: no cover
     from force_definition_3d import ForcesDefinition3D, is_time_symbol
-    from points_3d import SymbolicPointsCache3D, PointRecord3D, _make_r_local_fn
+    from points_3d import SymbolicPointsCache3D, _get_point_record, _make_r_local_fn
     from joint_coordinate_3d import CoordBundle
 
 
@@ -185,26 +185,6 @@ def _make_const_fn_jax(expr: Any, t_sym: sym.Symbol, force_sym_list: list, point
         return _f(t, *fp_vals, *pp_vals)
 
     return fn
-
-def _get_point_record(
-    body_id: int, pt_idx: int, sym_points: SymbolicPointsCache3D, label: str
-) -> PointRecord3D:
-    if body_id == 0:
-        if pt_idx >= len(sym_points.ground_points):
-            raise ValueError(
-                f"{label}: ground pt_idx={pt_idx} out of range "
-                f"({len(sym_points.ground_points)} declared)."
-            )
-        return sym_points.ground_points[pt_idx]
-    if body_id not in sym_points.body_points:
-        raise ValueError(f"{label}: no body_points for body {body_id}.")
-    pts = sym_points.body_points[body_id]
-    if pt_idx >= len(pts):
-        raise ValueError(
-            f"{label}: body {body_id} pt_idx={pt_idx} out of range "
-            f"({len(pts)} declared)."
-        )
-    return pts[pt_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -454,8 +434,6 @@ def make_forces_evaluator_mainint(
             mass_b = float(sym.sympify(body_inertia[b]["mass"]))
             _grav_weights_list.append(gd.g_app[b - 1] * mass_b)
 
-    n_cv = cv_cursor
-    n_rl = len(_r_local_fns)
     _needs_rate = bool(forces_def.tension_dampers)
     _needs_cache = bool(
         forces_def.point_forces

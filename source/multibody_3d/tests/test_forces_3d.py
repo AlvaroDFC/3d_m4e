@@ -292,17 +292,6 @@ class TestNumericEvaluation:
                     result.torsion_spring, result.gravity, result.total):
             assert arr.shape == (NB, 6), f"Shape mismatch: {arr.shape}"
 
-    def test_evaluate_total_wrench_matches_total(self, mbd_force_rr):
-        mbd, _ = mbd_force_rr
-        mnv = _mnv_rr(mbd, 0.1, -0.2, 0.3, 0.4, Fx=2.0, Fy=3.0)
-        total_via_result = mbd.evaluate_forces(mnv).total
-        total_via_method = mbd.evaluate_total_wrench(mnv)
-        np.testing.assert_allclose(
-            np.asarray(total_via_result),
-            np.asarray(total_via_method),
-            atol=0,
-        )
-
     def test_wrong_length_raises(self, mbd_force_rr):
         mbd, _ = mbd_force_rr
         with pytest.raises(ValueError, match="mainNumVars length mismatch"):
@@ -577,12 +566,6 @@ class TestTotalForce:
         np.testing.assert_allclose(
             np.asarray(result.total), manual_total, atol=1e-12,
         )
-
-    def test_evaluate_total_wrench_shape(self, mbd_force_rr):
-        mbd, _ = mbd_force_rr
-        mnv    = _mnv_rr(mbd, 0.0, 0.0, 0.0, 0.0)
-        total  = mbd.evaluate_total_wrench(mnv)
-        assert total.shape == (mbd.NBodies, 6)
 
 
 # ---------------------------------------------------------------------------

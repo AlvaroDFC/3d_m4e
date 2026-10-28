@@ -84,9 +84,6 @@ class RuntimeContext:
         :func:`velocity_transformation_3d.build_rate_cache_jax`
         (``A_abs``/``r_abs``/``rJ``/``U`` are supplied per-call from the
         position cache, not stored here).
-    is_time_dependent : bool
-        Whether the declared forces reference the reserved time symbol.
-        Always *False* until time-dependent forces are implemented.
     """
     n_qi: int
     NB:   int
@@ -100,7 +97,6 @@ class RuntimeContext:
     forces_e: Optional[Any]
     pos_cache_kwargs: Dict[str, Any]
     rate_topo_kwargs: Dict[str, Any]
-    is_time_dependent: bool = False
 
     def build_mainint(self, y: "jnp.ndarray") -> "jnp.ndarray":
         """Concatenate a diffrax state ``y = [q_int, qd]`` with the frozen
@@ -179,11 +175,6 @@ def build_runtime_context(mbd: "MbdSystem3D", mainNumVars) -> RuntimeContext:
         pos_cache_kwargs = {k: v for k, v in geom.items() if k in _POS_CACHE_KEYS}
         rate_topo_kwargs = {k: v for k, v in geom.items() if k in _RATE_TOPO_KEYS}
 
-    is_time_dependent = bool(
-        mbd.forces_def is not None
-        and getattr(mbd.forces_def, "is_time_dependent", False)
-    )
-
     return RuntimeContext(
         n_qi=mbd.total_cfg_dof,
         NB=mbd.NBodies,
@@ -195,7 +186,6 @@ def build_runtime_context(mbd: "MbdSystem3D", mainNumVars) -> RuntimeContext:
         forces_e=forces_e,
         pos_cache_kwargs=pos_cache_kwargs,
         rate_topo_kwargs=rate_topo_kwargs,
-        is_time_dependent=is_time_dependent,
     )
 
 

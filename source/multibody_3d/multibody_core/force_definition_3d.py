@@ -339,18 +339,6 @@ class ForcesDefinition3D:
 
     # ── Public query helpers ──────────────────────────────────────────────────────────
 
-    def is_empty(self) -> bool:
-        """Return *True* if no force elements are defined."""
-        return not any([
-            self.cg_forces,
-            self.point_forces,
-            self.tension_springs,
-            self.tension_dampers,
-            self.torsion_springs,
-            self.torsion_dampers,
-            self.gravity is not None,
-        ])
-
     def collect_symbols(self, *, include_time: bool = False) -> List[sym.Symbol]:
         """Return all free SymPy symbols appearing in force parameters.
 
