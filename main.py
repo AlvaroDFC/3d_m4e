@@ -67,26 +67,12 @@ Bdot_blocks = mbd.vt.build_Bdot_blocks_symbolic(mbd.q_int, mbd.qd_int)
 # # Ingredients only (faster, no full matrix expansion)
 # BlockInspector.display_B_blocks(blocks, show_matrix=True)
 
-####### Points evaluator ######################################################
-# Warm-up
-# _ = mbd.evaluate_points(mainNumVars)
-
-# t0 = time()
-# for _ in range(n):
-#     pts = mbd.evaluate_points(mainNumVars)
-# print(f"Points eval:  {(time()-t0)/n*1e6:.2f} µs/call")
-
-# print("\nPoints – r_abs_cg (CG positions, world frame):")
-# print(np.array(pts.r_abs_cg))
-
-# print("\nPoints – r_abs_body (body-attached points, world frame):")
-# print(np.array(pts.r_abs_body))
-
-# print("\nPoints – rho_abs_body (CG-relative moment arms, world frame):")
-# print(np.array(pts.rho_abs_body))
-
-# print("\nPoints – r_abs_gr (ground reference points, world frame):")
-# print(np.array(pts.r_abs_gr))
+####### Points / joints kinematics ############################################
+# kin = mbd.compute_kinematics(sol, mainNumVars)   # with_velocities=False to skip rates
+# print(kin.r_cg[-1])      # (NBodies, 3) CG positions, world frame
+# print(kin.r_pts[-1])     # (n_body_pts, 3) body-attached points, world frame
+# print(kin.r_joint[-1])   # (NJoints, 3) joint locations, world frame
+# print(kin.r_gr)          # (n_gr, 3) ground points, world frame
 
 ####### Forces evaluator ######################################################
 # Warm-up
@@ -135,6 +121,12 @@ plot.plot_body_energy(energy)
 kin = mbd.compute_kinematics(sol, mainNumVars)
 plot.plot_body_velocities(kin)
 plot.plot_body_trajectories(kin)
+
+# 3-D snapshot and animation; keep `anim` referenced while the window is open
+from multibody_3d import compute_forces_states
+forces = compute_forces_states(mbd, sol.ts, sol.ys, mainNumVars) if mbd.forces_func is not None else None
+plot.plot_snapshot(mbd, kin, frame=0, forces=forces, show_labels=True)
+anim = plot.animate_multibody(mbd, kin, forces=forces, frame_step=2, fps=20, camera_mode='track')   # save_path="anim.gif" writes a file
 
 plt.show()
 

@@ -2,11 +2,12 @@
 
 Persistent JAX force evaluators for 3D multibody systems.
 
-Mirrors the architecture of ``make_B_evaluator_mainint`` and
-``make_points_evaluator_mainint`` in the existing codebase.  The built
+Mirrors the architecture of ``make_B_evaluator_mainint`` in the existing
+codebase.  The built
 callable accepts a full ``mainNumVars_int`` vector (same layout as every
 other runtime evaluator in the system) and returns a :class:`ForcesEvalResult`
 with per-category per-body 6-DOF wrenches and potential energy.
+:func:`compute_forces_states` evaluates it over a set of states for postprocessing.
 
 Design principles
 -----------------
@@ -22,8 +23,8 @@ Design principles
   then converted to a single JAX array (``const_vals``) that is passed into
   the JIT boundary.
 * **r_local evaluated outside JIT**: body-point local-frame coordinates may
-  depend on ``points_sym`` parameters.  They are lambdified once (same as in
-  ``make_points_evaluator_mainint``) and evaluated in numpy before calling the
+  depend on ``points_sym`` parameters.  They are lambdified once and
+  evaluated in numpy before calling the
   JIT kernel.
 * **Static-shape friendly**: every output array has shape ``(NBodies, 6)``
   regardless of which categories are present.  Absent categories return zeros.
@@ -46,7 +47,7 @@ const_vals layout (per element, in declaration order)
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 import sympy as sym
@@ -64,11 +65,11 @@ if not _JAX_AVAILABLE:
 
 try:
     from .force_definition_3d import ForcesDefinition3D, is_time_symbol
-    from .points_3d import SymbolicPointsCache3D, PointRecord3D, _make_r_local_fn
+    from .points_3d import SymbolicPointsCache3D, _get_point_record, _make_r_local_fn
     from .joint_coordinate_3d import CoordBundle
 except Exception:  # pragma: no cover
     from force_definition_3d import ForcesDefinition3D, is_time_symbol
-    from points_3d import SymbolicPointsCache3D, PointRecord3D, _make_r_local_fn
+    from points_3d import SymbolicPointsCache3D, _get_point_record, _make_r_local_fn
     from joint_coordinate_3d import CoordBundle
 
 
@@ -93,6 +94,9 @@ class ForcesEvalResult(NamedTuple):
     gravity : jnp.ndarray, (NBodies, 6)
     total : jnp.ndarray, (NBodies, 6)
     spring_potential_energy : jnp.ndarray, scalar
+    point_forces : jnp.ndarray, (n_pbd, 3)
+        Force vector of each ``PointsBD`` entry in declaration order (the
+        ``points_bd`` wrench only holds the sum per body).
     """
     cg:                    "jnp.ndarray"
     points_bd:             "jnp.ndarray"
@@ -103,6 +107,7 @@ class ForcesEvalResult(NamedTuple):
     gravity:               "jnp.ndarray"
     total:                 "jnp.ndarray"
     spring_potential_energy: "jnp.ndarray"
+    point_forces:          "jnp.ndarray"
 
 
 # ---------------------------------------------------------------------------
@@ -180,26 +185,6 @@ def _make_const_fn_jax(expr: Any, t_sym: sym.Symbol, force_sym_list: list, point
         return _f(t, *fp_vals, *pp_vals)
 
     return fn
-
-def _get_point_record(
-    body_id: int, pt_idx: int, sym_points: SymbolicPointsCache3D, label: str
-) -> PointRecord3D:
-    if body_id == 0:
-        if pt_idx >= len(sym_points.ground_points):
-            raise ValueError(
-                f"{label}: ground pt_idx={pt_idx} out of range "
-                f"({len(sym_points.ground_points)} declared)."
-            )
-        return sym_points.ground_points[pt_idx]
-    if body_id not in sym_points.body_points:
-        raise ValueError(f"{label}: no body_points for body {body_id}.")
-    pts = sym_points.body_points[body_id]
-    if pt_idx >= len(pts):
-        raise ValueError(
-            f"{label}: body {body_id} pt_idx={pt_idx} out of range "
-            f"({len(pts)} declared)."
-        )
-    return pts[pt_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -449,8 +434,6 @@ def make_forces_evaluator_mainint(
             mass_b = float(sym.sympify(body_inertia[b]["mass"]))
             _grav_weights_list.append(gd.g_app[b - 1] * mass_b)
 
-    n_cv = cv_cursor
-    n_rl = len(_r_local_fns)
     _needs_rate = bool(forces_def.tension_dampers)
     _needs_cache = bool(
         forces_def.point_forces
@@ -502,12 +485,14 @@ def make_forces_evaluator_mainint(
             w_cg = w_cg.at[b0].add(f6)
 
         # PointsBD forces
+        pt_f = []
         for b0, cv0, rl_i in _pbd_meta:
             f3      = const_vals[cv0:cv0 + 3]
             m_free  = const_vals[cv0 + 3:cv0 + 6]
             _, rho  = _point_rabs_rho(b0 + 1, rl_i, r_locals, A_abs, r_abs)
             m_r     = jnp.cross(rho, f3)
             w_pbd   = w_pbd.at[b0].add(_wrench6(f3, m_r + m_free))
+            pt_f.append(f3)
 
         # TensionSpring
         for ba, bb, rl_a, rl_b, cv0 in _ts_meta:
@@ -601,6 +586,7 @@ def make_forces_evaluator_mainint(
             torsion_spring=w_ss, torsion_damper=w_sd,
             gravity=w_grav, total=total,
             spring_potential_energy=pe,
+            point_forces=jnp.stack(pt_f) if pt_f else jnp.zeros((0, 3)),
         )
 
     # ── Numpy helper: evaluate all lambdas → const_vals ───────────────────
@@ -754,3 +740,58 @@ def make_forces_evaluator_mainint(
         _evaluate.freeze = _freeze
 
     return _evaluate
+
+
+def compute_forces_states(mbd, ts, ys, mainNumVars) -> ForcesEvalResult:
+    """Evaluate ``mbd.forces_func`` at every state, e.g. over an integrated solution.
+
+    Postprocessing operation — not part of the ODE right-hand side.  Returns the
+    fields of :meth:`MbdSystem3D.evaluate_forces` as numpy arrays with a leading
+    frame axis: ``cg`` is ``(n_steps, NBodies, 6)``, ``point_forces`` is
+    ``(n_steps, n_pbd, 3)`` and ``spring_potential_energy`` is ``(n_steps,)``.
+
+    Parameters
+    ----------
+    mbd : MbdSystem3D
+        Must declare a ``Force`` dictionary.
+    ts : array_like, shape ``(n_steps,)``
+        Time of each state; time-dependent force expressions are evaluated here.
+    ys : array_like, shape ``(n_steps, W)``
+        State rows ``[q_int, qd]`` (e.g. ``sol.ys``) or ``[q_user, qd]``; the
+        ``qd`` columns are needed because dampers depend on them.
+    mainNumVars : array_like, shape ``(len(mainSymVars),)``
+        The same user-facing vector passed to :meth:`MbdSystem3D.integrate`;
+        supplies the constant body / force / point parameters.
+
+    Returns
+    -------
+    ForcesEvalResult
+    """
+    if mbd.forces_func is None:
+        raise RuntimeError(
+            "compute_forces_states() requires a Force dictionary to be declared."
+        )
+    try:
+        from .runtime_context_3d import as_internal_states, build_runtime_context   # noqa: PLC0415
+    except Exception:  # pragma: no cover
+        from runtime_context_3d import as_internal_states, build_runtime_context
+
+    ts = np.atleast_1d(np.asarray(ts, dtype=float))
+    ys = as_internal_states(mbd, ys, need_qd=True)
+    if ts.shape[0] != ys.shape[0]:
+        raise ValueError(f"ts has {ts.shape[0]} entries but ys has {ys.shape[0]} rows.")
+
+    ctx    = build_runtime_context(mbd, mainNumVars)
+    key    = (ctx.bp_np.tobytes(), ctx.fp_np.tobytes(), ctx.pp_np.tobytes())
+    cached = mbd._runtime_cache.get("forces_kernel")
+    if cached is None or cached[0] != key:
+        forces_e, cb, cf, cp = ctx.forces_e, ctx.cb, ctx.cf, ctx.cp
+
+        def _forces_at(y, t):
+            return forces_e(jnp.concatenate([y, cb, cf, cp]), t)
+
+        cached = (key, jax.jit(jax.vmap(_forces_at)))
+        mbd._runtime_cache["forces_kernel"] = cached
+
+    out = cached[1](jnp.asarray(ys, dtype=jnp.float64), jnp.asarray(ts, dtype=jnp.float64))
+    return ForcesEvalResult(*(np.asarray(a) for a in out))

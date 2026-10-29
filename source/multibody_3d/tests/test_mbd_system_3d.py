@@ -777,92 +777,66 @@ class TestSymbolicPoints:
         rec = mbd.sym_points.body_points[1][0]
         assert a in rec.r_abs.free_symbols
 
-    # ---- 5. JAX evaluator built during __post_init__ ---------------------------
+    # ---- 5. Point/joint/ground kinematics via compute_kinematics_states ----------
 
-    def test_points_func_built(self, mbd_with_points):
-        mbd, _ = mbd_with_points
-        assert mbd.points_func is not None
-        assert callable(mbd.points_func)
-
-    def test_points_spec_built(self, mbd_with_points):
-        from multibody_3d import PointsRuntimeSpec
-        mbd, _ = mbd_with_points
-        assert mbd._points_spec is not None
-        assert isinstance(mbd._points_spec, PointsRuntimeSpec)
-
-    # ---- 6. Public evaluate_points(mainNumVars) ----------------------------------
-
-    def test_evaluate_points_returns_correct_type(self, mbd_with_points):
-        from multibody_3d import PointsEvalResult
-        mbd, _ = mbd_with_points
-        result = mbd.evaluate_points(np.array([0.0, 0.0, 1.5]))
-        assert isinstance(result, PointsEvalResult)
-
-    def test_evaluate_points_output_shapes(self, mbd_with_points):
-        mbd, _ = mbd_with_points
-        result = mbd.evaluate_points(np.array([0.0, 0.0, 1.5]))
-        assert result.r_abs_body.shape  == (1, 3)
-        assert result.rho_abs_body.shape == (1, 3)
-        assert result.r_abs_cg.shape    == (mbd.NBodies, 3)
-        assert result.r_abs_gr.shape    == (1, 3)
-
-    def test_evaluate_points_gr_at_world_origin(self, mbd_with_points):
-        mbd, _ = mbd_with_points
-        result = mbd.evaluate_points(np.array([0.0, 0.0, 1.5]))
-        np.testing.assert_allclose(
-            np.asarray(result.r_abs_gr[0]), [0.0, 0.0, 0.0], atol=1e-12
+    @staticmethod
+    def _kin(mbd, a_val=1.5, **kw):
+        from multibody_3d import compute_kinematics_states
+        return compute_kinematics_states(
+            mbd, ts=[0.0], ys=[[0.0, 0.0]],
+            mainNumVars=np.array([0.0, 0.0, a_val]), **kw,
         )
 
-    def test_evaluate_points_cg_at_zero_angle(self, mbd_with_points):
-        """At θ=0: body-1 CG = p2j + j2c = [1,0,0] + [-1,0,0] = [0,0,0]."""
+    def test_kinematics_output_shapes(self, mbd_with_points):
         mbd, _ = mbd_with_points
-        result = mbd.evaluate_points(np.array([0.0, 0.0, 1.5]))
-        np.testing.assert_allclose(
-            np.asarray(result.r_abs_cg[0]), [0.0, 0.0, 0.0], atol=1e-10
-        )
+        kin = self._kin(mbd)
+        assert kin.r_pts.shape   == (1, 1, 3)
+        assert kin.r_cg.shape    == (1, mbd.NBodies, 3)
+        assert kin.r_joint.shape == (1, mbd.NJoints, 3)
+        assert kin.r_gr.shape    == (1, 3)
 
-    def test_evaluate_points_body_coords_at_zero_angle(self, mbd_with_points):
-        """At θ=0 and a=1.5: body-point absolute position = [1.5, 0, 0]."""
+    def test_kinematics_gr_at_world_origin(self, mbd_with_points):
         mbd, _ = mbd_with_points
-        result = mbd.evaluate_points(np.array([0.0, 0.0, 1.5]))
-        np.testing.assert_allclose(
-            np.asarray(result.r_abs_body[0]), [1.5, 0.0, 0.0], atol=1e-10
-        )
+        np.testing.assert_allclose(self._kin(mbd).r_gr[0], [0.0, 0.0, 0.0], atol=1e-12)
 
-    def test_evaluate_points_rho_at_zero_angle(self, mbd_with_points):
-        """At θ=0 and a=1.5: CG-relative arm rho = [1.5, 0, 0]."""
+    def test_kinematics_cg_at_zero_angle(self, mbd_with_points):
+        """At theta=0: body-1 CG = p2j + j2c = [1,0,0] + [-1,0,0] = [0,0,0]."""
         mbd, _ = mbd_with_points
-        result = mbd.evaluate_points(np.array([0.0, 0.0, 1.5]))
-        np.testing.assert_allclose(
-            np.asarray(result.rho_abs_body[0]), [1.5, 0.0, 0.0], atol=1e-10
-        )
+        np.testing.assert_allclose(self._kin(mbd).r_cg[0, 0], [0.0, 0.0, 0.0], atol=1e-10)
 
-    # ---- 7. Internal path via points_func(mainNumVars_int) ---------------------
-
-    def test_evaluate_points_internal_path(self, mbd_with_points):
+    def test_kinematics_body_point_at_zero_angle(self, mbd_with_points):
+        """At theta=0 and a=1.5: body-point absolute position = [1.5, 0, 0]."""
         mbd, _ = mbd_with_points
-        mnv = np.array([0.0, 0.0, 1.5])
-        arr = mbd._validate_mainNumVars_shape(mnv)
-        mnv_int = mbd._build_mainNumVars_int(arr)
-        result = mbd.points_func(mnv_int)
-        np.testing.assert_allclose(
-            np.asarray(result.r_abs_body[0]), [1.5, 0.0, 0.0], atol=1e-10
-        )
+        np.testing.assert_allclose(self._kin(mbd).r_pts[0, 0], [1.5, 0.0, 0.0], atol=1e-10)
 
-    # ---- 8. Changing point-symbol value changes coordinates --------------------
+    def test_kinematics_joint_at_zero_angle(self, mbd_with_points):
+        """Joint 0 sits at p2j = [1, 0, 0] from the ground origin."""
+        mbd, _ = mbd_with_points
+        np.testing.assert_allclose(self._kin(mbd).r_joint[0, 0], [1.0, 0.0, 0.0], atol=1e-10)
 
     def test_point_sym_value_changes_result(self, mbd_with_points):
         """Doubling 'a' must double the x-coordinate of the body point."""
         mbd, _ = mbd_with_points
-        r1 = float(np.asarray(mbd.evaluate_points(np.array([0.0, 0.0, 1.5])).r_abs_body[0, 0]))
-        r2 = float(np.asarray(mbd.evaluate_points(np.array([0.0, 0.0, 3.0])).r_abs_body[0, 0]))
-        assert r2 == pytest.approx(2.0 * r1)
+        x1 = self._kin(mbd, 1.5).r_pts[0, 0, 0]
+        x2 = self._kin(mbd, 3.0).r_pts[0, 0, 0]
+        assert x2 == pytest.approx(2.0 * x1)
 
-    # ---- 9. No points_func / sym_points when Initial_Points is empty -----------
+    def test_kinematics_without_velocities(self, mbd_with_points):
+        mbd, _ = mbd_with_points
+        kin = self._kin(mbd, with_velocities=False)
+        assert kin.v_cg is None and kin.omega_cg is None and kin.v_pts is None
+        assert kin.r_pts.shape == (1, 1, 3)
 
-    def test_no_points_func_when_no_initial_points(self, data_RR):
+    def test_kinematics_with_velocities_shapes(self, mbd_with_points):
+        mbd, _ = mbd_with_points
+        kin = self._kin(mbd)
+        assert kin.v_cg.shape == (1, mbd.NBodies, 3)
+        assert kin.v_pts.shape == (1, 1, 3)
+
+    # ---- 6. No sym_points when Initial_Points is empty ---------------------------
+
+    def test_no_sym_points_when_no_initial_points(self, data_RR):
         mbd = MbdSystem3D(data_RR)
-        assert mbd.points_func is None
         assert mbd.sym_points is None
 
     # ---- 10. Symbolic force reduction -------------------------------------------
@@ -891,19 +865,144 @@ class TestSymbolicPoints:
         _, m_eq = mbd.sym_force_reduction_at_point(rec, f_vec)
         assert a in m_eq.free_symbols
 
-    # ---- 11. Numeric force reduction via PointsEvalResult.reduce_force_at -----
 
-    def test_numeric_force_reduction_correctness(self, mbd_with_points):
-        """
-        rho = [1.5, 0, 0], F = [0, 0, 1]
-        moment = rho × F = [0*1-0*0, 0*0-1.5*1, 1.5*0-0*0] = [0, -1.5, 0]
-        """
+# ---------------------------------------------------------------------------
+# compute_kinematics_states: state layouts and kernel / evaluator caching
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def data_S_euler():
+    """1-body spherical joint with Euler user coordinates (3 user -> 4 internal)."""
+    return {
+        "NBodies": 1,
+        "joints": [(0, 1)],
+        "types": ["S"],
+        "parent_cg_to_joint": [Z3],
+        "joint_to_child_cg": [[0.5, 0.0, 0.0]],
+        "axis_u": [None],
+        "axis_u1": [None],
+        "axis_u2": [None],
+    }
+
+
+class TestKinematicsStateLayouts:
+    """User- and internal-layout state rows are both accepted."""
+
+    Q_USER = np.array([0.3, -0.2, 0.5])
+
+    @staticmethod
+    def _kin(mbd, ys, mnv, **kw):
+        from multibody_3d import compute_kinematics_states
+        return compute_kinematics_states(mbd, [0.0], ys, mnv, **kw)
+
+    def test_user_rows_match_mapped_internal_rows(self, data_S_euler):
+        mbd = MbdSystem3D(data_S_euler)
+        mnv = np.zeros(mbd.total_user_dof + mbd.total_dof)
+        qd0 = np.zeros(mbd.total_dof)
+        q_int = mbd.map_q_user_to_q_int(self.Q_USER)
+
+        k_int  = self._kin(mbd, np.hstack([q_int, qd0])[None, :], mnv)
+        k_user = self._kin(mbd, np.hstack([self.Q_USER, qd0])[None, :], mnv)
+
+        np.testing.assert_allclose(k_user.r_cg, k_int.r_cg, atol=1e-12)
+        np.testing.assert_allclose(k_user.R_cg, k_int.R_cg, atol=1e-12)
+        assert not np.allclose(k_user.R_cg[0, 0], np.eye(3))   # the mapping was applied
+
+    def test_q_only_rows_need_velocities_off(self, data_S_euler):
+        mbd = MbdSystem3D(data_S_euler)
+        mnv = np.zeros(mbd.total_user_dof + mbd.total_dof)
+        q_int = mbd.map_q_user_to_q_int(self.Q_USER)
+        ref = self._kin(mbd, np.hstack([q_int, np.zeros(mbd.total_dof)])[None, :], mnv)
+
+        for q_rows in (self.Q_USER, q_int):
+            kin = self._kin(mbd, q_rows[None, :], mnv, with_velocities=False)
+            np.testing.assert_allclose(kin.R_cg, ref.R_cg, atol=1e-12)
+            assert kin.v_cg is None
+            with pytest.raises(ValueError, match="qd"):
+                self._kin(mbd, q_rows[None, :], mnv)
+
+    def test_unrecognised_width_raises(self, data_S_euler):
+        mbd = MbdSystem3D(data_S_euler)
+        mnv = np.zeros(mbd.total_user_dof + mbd.total_dof)
+        with pytest.raises(ValueError, match="width"):
+            self._kin(mbd, np.zeros((1, 5)), mnv)
+
+    def test_ts_ys_length_mismatch_raises(self, data_S_euler):
+        from multibody_3d import compute_kinematics_states
+        mbd = MbdSystem3D(data_S_euler)
+        mnv = np.zeros(mbd.total_user_dof + mbd.total_dof)
+        with pytest.raises(ValueError, match="rows"):
+            compute_kinematics_states(mbd, [0.0, 1.0], np.zeros((1, 7)), mnv)
+
+    def test_layouts_coincide_without_euler_joints(self, mbd_with_points):
+        """Revolute-only system: q-only rows are valid in both layouts."""
         mbd, _ = mbd_with_points
-        result = mbd.evaluate_points(np.array([0.0, 0.0, 1.5]))
-        f_eq, m_eq = result.reduce_force_at(0, [0.0, 0.0, 1.0])
-        np.testing.assert_allclose(
-            np.asarray(f_eq).ravel(), [0.0, 0.0, 1.0], atol=1e-12
+        mnv = np.array([0.0, 0.0, 1.5])
+        kin = self._kin(mbd, np.array([[0.4]]), mnv, with_velocities=False)
+        full = self._kin(mbd, np.array([[0.4, 0.0]]), mnv)
+        np.testing.assert_allclose(kin.r_pts, full.r_pts, atol=1e-12)
+
+
+class TestKinematicsCache:
+    """The jitted kernel and the lambdified point evaluators are reused across calls."""
+
+    @staticmethod
+    def _run(mbd, a_val=1.5, **kw):
+        from multibody_3d import compute_kinematics_states
+        return compute_kinematics_states(
+            mbd, [0.0], [[0.0, 0.0]], np.array([0.0, 0.0, a_val]), **kw,
         )
-        np.testing.assert_allclose(
-            np.asarray(m_eq).ravel(), [0.0, -1.5, 0.0], atol=1e-10
-        )
+
+    @staticmethod
+    def _count_calls(monkeypatch, module, name):
+        real, calls = getattr(module, name), []
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, counting)
+        return calls
+
+    def test_kernel_traced_once_for_repeated_calls(self, mbd_with_points, monkeypatch):
+        from multibody_3d.multibody_core import velocity_transformation_3d as vt
+        traces = self._count_calls(monkeypatch, vt, "build_cache_jax")
+        mbd, _ = mbd_with_points
+        self._run(mbd)
+        self._run(mbd)
+        assert len(traces) == 1
+
+    def test_kernel_rebuilt_only_when_parameters_change(self, mbd_with_points, monkeypatch):
+        from multibody_3d.multibody_core import velocity_transformation_3d as vt
+        traces = self._count_calls(monkeypatch, vt, "build_cache_jax")
+        mbd, _ = mbd_with_points
+        self._run(mbd, 1.5)
+        self._run(mbd, 3.0)
+        self._run(mbd, 3.0)
+        assert len(traces) == 2
+
+    def test_velocity_variants_do_not_evict_each_other(self, mbd_with_points, monkeypatch):
+        from multibody_3d.multibody_core import velocity_transformation_3d as vt
+        traces = self._count_calls(monkeypatch, vt, "build_cache_jax")
+        mbd, _ = mbd_with_points
+        for with_velocities in (True, False, True, False):
+            self._run(mbd, with_velocities=with_velocities)
+        assert len(traces) == 2
+
+    def test_point_evaluators_lambdified_once(self, mbd_with_points, monkeypatch):
+        from multibody_3d.multibody_core import points_3d
+        built = self._count_calls(monkeypatch, points_3d, "_make_r_local_fn")
+        mbd, _ = mbd_with_points
+        self._run(mbd, 1.5)
+        self._run(mbd, 3.0)
+        self._run(mbd, 3.0, with_velocities=False)
+        assert len(built) == 2   # one body point + one ground point
+
+    def test_results_do_not_alias_the_cache(self, mbd_with_points):
+        mbd, _ = mbd_with_points
+        kin = self._run(mbd)
+        kin.r_gr[:] = 99.0
+        kin.pt_body_slices.clear()
+        again = self._run(mbd)
+        np.testing.assert_allclose(again.r_gr, 0.0)
+        assert again.pt_body_slices == {1: slice(0, 1)}

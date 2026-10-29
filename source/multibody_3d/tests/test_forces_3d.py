@@ -19,7 +19,8 @@ import numpy as np
 import pytest
 import sympy as sym
 
-from multibody_3d import MbdSystem3D, ForcesEvalResult, SymbolicForcesCache3D
+from multibody_3d import MbdSystem3D, ForcesEvalResult, SymbolicForcesCache3D, compute_forces_states
+from multibody_3d.multibody_core.force_definition_3d import T_SYM
 
 jax = pytest.importorskip("jax")
 import jax.numpy as jnp  # noqa: E402
@@ -290,17 +291,6 @@ class TestNumericEvaluation:
         for arr in (result.cg, result.points_bd,
                     result.torsion_spring, result.gravity, result.total):
             assert arr.shape == (NB, 6), f"Shape mismatch: {arr.shape}"
-
-    def test_evaluate_total_wrench_matches_total(self, mbd_force_rr):
-        mbd, _ = mbd_force_rr
-        mnv = _mnv_rr(mbd, 0.1, -0.2, 0.3, 0.4, Fx=2.0, Fy=3.0)
-        total_via_result = mbd.evaluate_forces(mnv).total
-        total_via_method = mbd.evaluate_total_wrench(mnv)
-        np.testing.assert_allclose(
-            np.asarray(total_via_result),
-            np.asarray(total_via_method),
-            atol=0,
-        )
 
     def test_wrong_length_raises(self, mbd_force_rr):
         mbd, _ = mbd_force_rr
@@ -577,12 +567,6 @@ class TestTotalForce:
             np.asarray(result.total), manual_total, atol=1e-12,
         )
 
-    def test_evaluate_total_wrench_shape(self, mbd_force_rr):
-        mbd, _ = mbd_force_rr
-        mnv    = _mnv_rr(mbd, 0.0, 0.0, 0.0, 0.0)
-        total  = mbd.evaluate_total_wrench(mnv)
-        assert total.shape == (mbd.NBodies, 6)
-
 
 # ---------------------------------------------------------------------------
 # Goal 8 — changing symbolic coefficient values changes the result
@@ -647,3 +631,102 @@ class TestParametricSensitivity:
         g_low  = np.asarray(mbd.evaluate_forces(_mnv_rr(mbd, 0, 0, 0, 0, k_t=1.0)).gravity)
         g_high = np.asarray(mbd.evaluate_forces(_mnv_rr(mbd, 0, 0, 0, 0, k_t=99.0)).gravity)
         np.testing.assert_allclose(g_low, g_high, atol=1e-14)
+
+
+# ---------------------------------------------------------------------------
+# compute_forces_states: forces_func over a set of states
+# ---------------------------------------------------------------------------
+
+_DATA_1R = {
+    "NBodies": 1,
+    "joints": [(0, 1)],
+    "types": ["R"],
+    "parent_cg_to_joint": [[0.0, 0.0, 0.0]],
+    "joint_to_child_cg":  [[0.0, -1.0, 0.0]],
+    "axis_u": [[0, 0, 1]],
+    "axis_u1": [None],
+    "axis_u2": [None],
+}
+_I_SMALL = [[0.01, 0.0, 0.0], [0.0, 0.01, 0.0], [0.0, 0.0, 0.01]]
+
+
+class TestComputeForcesStates:
+
+    TS = np.array([0.0, 0.4, 0.9])
+    Q  = np.array([[0.0, 0.0], [0.3, -0.2], [0.6, -0.4]])
+    QD = np.array([[0.1, 0.2], [0.0, -0.3], [0.5, 0.4]])
+
+    @classmethod
+    def _states(cls):
+        return np.hstack([cls.Q, cls.QD])
+
+    def test_matches_evaluate_forces_at_every_state(self, mbd_force_rr):
+        mbd, _ = mbd_force_rr
+        kw  = dict(Fx=2.0, Fy=3.0, Mz=0.5, k_t=4.0, a=1.0, b=1.5)
+        out = compute_forces_states(mbd, self.TS, self._states(), _mnv_rr(mbd, 0, 0, 0, 0, **kw))
+
+        assert isinstance(out, ForcesEvalResult)
+        assert out.cg.shape == (3, 2, 6) and out.point_forces.shape == (3, 1, 3)
+        assert out.spring_potential_energy.shape == (3,)
+        for k in range(3):
+            ref = mbd.evaluate_forces(_mnv_rr(mbd, *self.Q[k], *self.QD[k], **kw), t=self.TS[k])
+            for name in ("cg", "points_bd", "torsion_spring", "gravity", "total",
+                         "spring_potential_energy", "point_forces"):
+                np.testing.assert_allclose(
+                    getattr(out, name)[k], np.asarray(getattr(ref, name)), atol=1e-12,
+                )
+
+    def test_point_forces_hold_each_point_force_vector(self, mbd_force_rr):
+        mbd, _ = mbd_force_rr
+        out = compute_forces_states(
+            mbd, self.TS, self._states(), _mnv_rr(mbd, 0, 0, 0, 0, Fy=2.5),
+        )
+        np.testing.assert_allclose(out.point_forces, np.tile([0.0, 2.5, 0.0], (3, 1, 1)))
+
+    def test_several_point_forces_on_one_body_keep_their_own_vectors(self):
+        mbd = MbdSystem3D(
+            data=_DATA_1R,
+            Initial_Points={"BD": {1: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]}},
+            Force={"PointsBD": [(1, 0, [1.0, 0.0, 0.0]), (1, 1, [0.0, 2.0, 0.0])]},
+        )
+        out = compute_forces_states(mbd, [0.0], [[0.0, 0.0]], np.zeros(2))
+        np.testing.assert_allclose(out.point_forces[0], [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+        np.testing.assert_allclose(out.points_bd[0, 0, :3], [1.0, 2.0, 0.0])   # only the sum
+
+    def test_time_dependent_expressions_follow_ts(self):
+        mbd = MbdSystem3D(
+            data=_DATA_1R,
+            Force={"CG": {1: {"force": [100 * sym.sin(T_SYM), 0, 0]}}},
+            body_inertia={1: {"mass": 1.0, "J": _I_SMALL}},
+        )
+        ts  = np.array([0.0, np.pi / 2])
+        out = compute_forces_states(mbd, ts, np.zeros((2, 2)), np.zeros(2))
+        np.testing.assert_allclose(out.cg[:, 0, 0], [0.0, 100.0], atol=1e-9)
+
+    def test_state_rows_need_the_qd_columns(self, mbd_force_rr):
+        mbd, _ = mbd_force_rr
+        with pytest.raises(ValueError, match="qd"):
+            compute_forces_states(mbd, self.TS, self.Q, _mnv_rr(mbd, 0, 0, 0, 0))
+
+    def test_ts_ys_length_mismatch_raises(self, mbd_force_rr):
+        mbd, _ = mbd_force_rr
+        with pytest.raises(ValueError, match="rows"):
+            compute_forces_states(mbd, self.TS[:2], self._states(), _mnv_rr(mbd, 0, 0, 0, 0))
+
+    def test_requires_a_force_dictionary(self):
+        mbd = MbdSystem3D(data=_DATA_1R)
+        with pytest.raises(RuntimeError, match="Force"):
+            compute_forces_states(mbd, [0.0], [[0.0, 0.0]], np.zeros(2))
+
+    def test_kernel_is_reused_until_the_parameters_change(self, mbd_force_rr):
+        mbd, _ = mbd_force_rr
+
+        def run(**kw):
+            compute_forces_states(mbd, self.TS, self._states(), _mnv_rr(mbd, 0, 0, 0, 0, **kw))
+
+        run(Fy=1.0)
+        first = mbd._runtime_cache["forces_kernel"]
+        run(Fy=1.0)
+        assert mbd._runtime_cache["forces_kernel"] is first
+        run(Fy=2.0)
+        assert mbd._runtime_cache["forces_kernel"] is not first
