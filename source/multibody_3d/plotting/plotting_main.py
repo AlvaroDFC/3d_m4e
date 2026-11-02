@@ -25,7 +25,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
-from matplotlib.transforms import offset_copy
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
 from .plotting_helper import (
@@ -61,7 +60,8 @@ class _Geometry(NamedTuple):
     pt_slices: dict         # body id -> slice into pts
     ground:    np.ndarray   # (n_gr, 3) constant
     layers:    dict         # name -> _Layer, in drawing order
-    bounds:    tuple | np.ndarray  # (6,) fixed bounds or (F, 6) tracking bounds
+    bounds:    tuple        # (xmin, xmax, ymin, ymax, zmin, zmax)
+    track_bounds: np.ndarray  # (F, 6) per-frame cube around the moving system
 
 
 class _Scene(NamedTuple):
@@ -71,23 +71,22 @@ class _Scene(NamedTuple):
     joints:      object # Line3D
     pts:         dict   # body id -> Line3D
     collections: dict   # layer name -> Line3DCollection
+    track:       bool   # follow geom.track_bounds instead of fixed limits
+    title:       str    # prefix of the per-frame title
 
 
 def _scene_geometry(
     mbd, kin, frames, *, triad_scale=None, bounds=None, show_triads=False, show_springs=True,
-    forces=None, show_forces=True, force_scale=0.2, camera_mode="global",
+    forces=None, show_forces=True, force_scale=0.2,
 ) -> _Geometry:
     """Points and line-segment layers of the chosen *frames* as numpy arrays.
 
     Bounds, symbol orientations and the force-arrow scale use every frame of
     *kin*, so all snapshots and the animation of one result look alike.  Force
     arrows use the instantaneous moving-system size, not the trajectory span.
-    Tracking bounds follow the moving geometry with a constant-size cube;
-    explicit bounds override tracking.
+    Tracked bounds are equal-size cubes centred on the moving system (CGs,
+    joints, body points and arrow tips; not ground points) in each frame.
     """
-    if camera_mode not in ("track", "global"):
-        raise ValueError("camera_mode must be 'track' or 'global'.")
-    tracking = camera_mode == "track" and bounds is None
     frames = np.asarray(frames, dtype=int)
     joints = mbd.joint_system.joints
     n_all, n_body = kin.r_cg.shape[:2]
@@ -117,30 +116,21 @@ def _scene_geometry(
         layers["dashes"] = _Layer(np.stack([cg_of_pt, r_pts], axis=2), pt_bodies, 2.5, "--", None)
 
     ground = np.asarray(kin.r_gr, dtype=float).reshape(-1, 3)
-    moving = np.concatenate([kin.r_cg, kin.r_joint, kin.r_pts], axis=1)
-    valid  = np.isfinite(moving).all(axis=-1, keepdims=True)
-    lower  = np.where(valid, moving, np.inf).min(axis=1)
-    upper  = np.where(valid, moving, -np.inf).max(axis=1)
-    spans  = (upper - lower).max(axis=-1)
-    system_span = float(spans[np.isfinite(spans)].max(initial=0.0)) or 1.0
-    every  = np.concatenate([moving.reshape(-1, 3), ground])
+    every  = np.concatenate([
+        kin.r_cg.reshape(-1, 3), kin.r_joint.reshape(-1, 3),
+        kin.r_pts.reshape(-1, 3), ground,
+    ])
     every  = every[np.isfinite(every).all(axis=1)]                     # skip unsaved / failed steps
     lo, hi = (every.min(axis=0), every.max(axis=0)) if len(every) else (-np.ones(3), np.ones(3))
     span   = float((hi - lo).max()) or 1.0
-    symbol_span = system_span if tracking else span
-    axis_len = 0.1 * symbol_span if triad_scale is None else float(triad_scale)
+    axis_len = 0.1 * span if triad_scale is None else float(triad_scale)
 
-    if tracking:
-        centres = np.zeros_like(lower)
-        finite_frames = np.isfinite(lower).all(axis=1)
-        centres[finite_frames] = 0.5 * (lower[finite_frames] + upper[finite_frames])
-        valid_indices = np.flatnonzero(finite_frames)
-        if len(valid_indices):
-            previous = np.maximum.accumulate(
-                np.where(finite_frames, np.arange(n_all), valid_indices[0]),
-            )
-            centres = centres[previous]
-        tracking_half = 1.05 * 0.5 * system_span + axis_len
+    moving = np.concatenate([kin.r_cg, kin.r_joint, kin.r_pts], axis=1)
+    valid  = np.isfinite(moving).all(axis=-1, keepdims=True)
+    t_lo   = np.where(valid, moving, np.inf).min(axis=1)              # (n_all, 3) per-frame box
+    t_hi   = np.where(valid, moving, -np.inf).max(axis=1)
+    spans  = (t_hi - t_lo).max(axis=-1)
+    system_span = float(spans[np.isfinite(spans)].max(initial=0.0)) or 1.0
 
     if show_triads:
         R      = kin.R_cg[frames]                                      # (F, NB, 3, 3)
@@ -151,8 +141,8 @@ def _scene_geometry(
 
     fdef = getattr(mbd, "forces_def", None) if show_springs else None
     if fdef is not None:
-        size = 0.03 * symbol_span      # coil radius and dashpot half-width
-        ring = 0.04 * symbol_span      # torsion symbol radius
+        size = 0.03 * span      # coil radius and dashpot half-width
+        ring = 0.04 * span      # torsion symbol radius
 
         def endpoint(body_id, pt_idx):                                 # (n_all, 3), every frame
             if body_id == 0:
@@ -248,53 +238,56 @@ def _scene_geometry(
                     arrow_segments(org[frames], vec[frames], u, v, 0.05 * system_span),
                     (colour,), 2.0, "-", f"{label} (longest: {f_max:.3g})",
                 )
-                tips.append((org + vec).reshape(-1, 3))
-                if tracking:
-                    relative_tips = (org + vec - centres[:, None, :]).reshape(-1, 3)
-                    relative_tips = relative_tips[np.isfinite(relative_tips).all(axis=1)]
-                    tracking_half = max(
-                        tracking_half,
-                        1.05 * float(np.abs(relative_tips).max(initial=0.0)) + 0.05 * system_span,
-                    )
-            tips = np.concatenate(tips)
-            tips = tips[np.isfinite(tips).all(axis=1)]
+                tips.append(org + vec)
+            tips  = np.concatenate(tips, axis=1)                         # (n_all, n_arrows, 3)
+            ok    = np.isfinite(tips).all(axis=-1, keepdims=True)
+            t_lo  = np.minimum(t_lo, np.where(ok, tips, np.inf).min(axis=1))
+            t_hi  = np.maximum(t_hi, np.where(ok, tips, -np.inf).max(axis=1))
+            tips  = tips.reshape(-1, 3)
+            tips  = tips[np.isfinite(tips).all(axis=1)]
             if len(tips):
                 lo, hi = np.minimum(lo, tips.min(axis=0)), np.maximum(hi, tips.max(axis=0))
 
-    if tracking:
-        bounds = np.stack([
-            centres[frames] - tracking_half, centres[frames] + tracking_half,
-        ], axis=-1).reshape(len(frames), 6)
-    elif bounds is None:
+    extent = (t_hi - t_lo).max(axis=-1)
+    extent = float(extent[np.isfinite(extent)].max(initial=0.0)) or 1.0
+    t_half = 1.05 * 0.5 * extent + (axis_len if show_triads else 0.0)
+    with np.errstate(invalid="ignore"):                               # inf + -inf in empty frames
+        t_mid = 0.5 * (t_lo + t_hi)
+    t_mid = np.where(np.isfinite(t_mid), t_mid, 0.5 * (lo + hi))
+    track = np.stack([t_mid - t_half, t_mid + t_half], axis=-1).reshape(n_all, 6)[frames]
+
+    if bounds is None:
         half   = 1.05 * 0.5 * (float((hi - lo).max()) or 1.0) + axis_len
         centre = 0.5 * (lo + hi)
         bounds = np.stack([centre - half, centre + half], axis=1).ravel()
     elif len(bounds) != 6:
         raise ValueError("bounds must be (xmin, xmax, ymin, ymax, zmin, zmax).")
-    if not tracking:
-        bounds = tuple(float(v) for v in bounds)
+    bounds = tuple(float(v) for v in bounds)
 
     return _Geometry(
         ts=np.asarray(kin.ts, dtype=float)[frames], cg=r_cg, joints=r_joint,
         pts=r_pts, pt_slices=dict(kin.pt_body_slices), ground=ground,
-        layers=layers, bounds=bounds,
+        layers=layers, bounds=bounds, track_bounds=track,
     )
 
 
-def _render(geom, k, *, scene=None, ax=None, view=None) -> _Scene:
+def _set_limits(ax, bounds):
+    ax.set_xlim(*bounds[0:2])
+    ax.set_ylim(*bounds[2:4])
+    ax.set_zlim(*bounds[4:6])
+
+
+def _render(geom, k, *, scene=None, ax=None, view=None, track=False, title="") -> _Scene:
     """Create the artists on the first call (``scene is None``) and move them to frame *k*.
 
     Pass the returned scene back on later calls to update the artists in place.
     Fixed drawing order keeps CGs above body points, joints and line layers.
+    With *track*, the limits follow ``geom.track_bounds`` frame by frame.
+    Artists are clipped to the limits so a tracked view hides distant elements.
     """
-    initialize = scene is None
-    tracking = np.ndim(geom.bounds) == 2
-    bounds = geom.bounds[k] if tracking else geom.bounds
     if scene is None:
         if ax is None:
-            fig = plt.figure(figsize=(8, 6))
-            fig.subplots_adjust(right=0.65)
-            ax = fig.add_subplot(projection="3d")
+            ax = plt.figure(figsize=(8, 6)).add_subplot(projection="3d")
         elif not hasattr(ax, "get_zlim"):
             raise ValueError("ax must be a 3-D axes (projection='3d').")
 
@@ -305,15 +298,16 @@ def _render(geom, k, *, scene=None, ax=None, view=None) -> _Scene:
 
         cg = [
             ax.plot(*blank, ls="none", marker="D", ms=7, mfc=colors[b], mec="k",
-                    label=f"CG body {b + 1}", zorder=5)[0]
+                    label=f"CG body {b + 1}", zorder=5, axlim_clip=True)[0]
             for b in range(n_body)
         ]
         joints = ax.plot(
             *blank, ls="none", marker="o", ms=7, mfc="w", mec="k", label="Joints", zorder=3,
+            axlim_clip=True,
         )[0]
         pts = {
             b: ax.plot(*blank, ls="none", marker="x", color=colors[b - 1], zorder=4,
-                       **({"label": "Body points"} if i == 0 else {}))[0]
+                       axlim_clip=True, **({"label": "Body points"} if i == 0 else {}))[0]
             for i, b in enumerate(geom.pt_slices)
         }
         collections = {}
@@ -324,21 +318,20 @@ def _render(geom, k, *, scene=None, ax=None, view=None) -> _Scene:
                 linewidths=layer.width, linestyles=layer.style, zorder=2,
                 **({"label": layer.label} if layer.label else {}),
             )
-            ax.add_collection3d(collections[name])
+            ax.add_collection3d(collections[name], axlim_clip=True)
         if len(geom.ground):
-            ax.plot(*geom.ground.T, ls="none", marker="s", ms=8, color="k", label="GR", zorder=3)
+            ax.plot(*geom.ground.T, ls="none", marker="s", ms=8, color="k", label="GR", zorder=3,
+                    axlim_clip=True)
 
+        bounds = geom.track_bounds[k] if track else geom.bounds
+        _set_limits(ax, bounds)
         ax.set_box_aspect(np.ptp(np.reshape(bounds, (3, 2)), axis=1))
         ax.set(xlabel="X", ylabel="Y", zlabel="Z")
-        ax.legend(loc="upper left", bbox_to_anchor=(1.12, 1.0), fontsize="small")
+        ax.legend(loc="upper left", fontsize="small")
         if view is not None:
             ax.view_init(*view)
-        scene = _Scene(ax.figure, ax, cg, joints, pts, collections)
+        scene = _Scene(ax.figure, ax, cg, joints, pts, collections, track, title)
 
-    if initialize or tracking:
-        scene.ax.set_xlim(*bounds[0:2])
-        scene.ax.set_ylim(*bounds[2:4])
-        scene.ax.set_zlim(*bounds[4:6])
     for b, line in enumerate(scene.cg):
         line.set_data_3d(*geom.cg[k, b][:, None])
     scene.joints.set_data_3d(*geom.joints[k].T)
@@ -346,7 +339,9 @@ def _render(geom, k, *, scene=None, ax=None, view=None) -> _Scene:
         line.set_data_3d(*geom.pts[k, geom.pt_slices[b]].T)
     for name, collection in scene.collections.items():
         collection.set_segments(geom.layers[name].segments[k])
-    scene.ax.set_title(f"t = {geom.ts[k]:.3f} s")
+    if scene.track:
+        _set_limits(scene.ax, geom.track_bounds[k])
+    scene.ax.set_title(f"{scene.title}t = {geom.ts[k]:.3f} s")
     return scene
 
 
@@ -374,11 +369,13 @@ def plot_snapshot(
     frame : int, optional
         Index into the frames of *kin*; negative values count from the end.
     ax : Axes3D, optional
-        3-D axes to draw on; a new figure is created if omitted.
+        3-D axes to draw on; a new figure is created if omitted.  The legend
+        is placed right of the axes; leave room for it in a given figure.
     bounds : tuple of 6 floats, optional
-        ``(xmin, xmax, ymin, ymax, zmin, zmax)``.  Default: a cube spanning
-        every frame of *kin* (and the arrow tips), so snapshots of one result
-        share the same view.
+        ``(xmin, xmax, ymin, ymax, zmin, zmax)``.  Default: the tracked view, a
+        cube centred on the moving system (CGs, joints, body points and arrow
+        tips) of this frame, sized to fit it in every frame of *kin*.  Ground
+        points and springs outside the cube are clipped.
     show_triads : bool, optional
         Draw the body x / y / z axes (red / green / blue) at each CG.
     show_springs : bool, optional
@@ -405,11 +402,10 @@ def plot_snapshot(
     view : tuple of 2 floats, optional
         Camera ``(elev, azim)`` in degrees; default keeps the axes' own view.
     show_labels : bool, optional
-        Label joints as ``J_{joint_idx}``, body points as ``BD_{point_idx}^{body_id}``
+        Label joints as ``J j``, body points as ``BD_{point_idx}^{body_id}``
         and ground points as ``GR[point_idx]``.  Joint and point indices are
         zero-based, matching the model definitions; body ids start at 1.
-        Joint and body point labels use mathematical subscripts and superscripts.
-        Joint labels sit 8 display points above and right of their markers.
+        Body point labels use mathematical subscripts and superscripts.
         Default False; CGs remain identified only by the legend.
 
     Returns
@@ -422,59 +418,49 @@ def plot_snapshot(
         show_triads=show_triads, show_springs=show_springs,
         forces=forces, show_forces=show_forces, force_scale=force_scale,
     )
-    scene = _render(geom, 0, ax=ax, view=view)
+    scene = _render(geom, 0, ax=ax, view=view, track=bounds is None)
+    scene.ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize="small")
+    if ax is None:
+        scene.fig.subplots_adjust(right=0.75)
     if show_labels:
-        joint_label_transform = offset_copy(
-            scene.ax.transData, fig=scene.fig, x=8, y=8, units="points",
-        )
-        ground_label_transform = offset_copy(
-            scene.ax.transData, fig=scene.fig,
-            x=0, y=-8, units="points",
-        )
-
         for joint_idx, position in enumerate(geom.joints[0]):
-            scene.ax.text(
-                *position, f"$J_{{{joint_idx}}}$", transform=joint_label_transform,
-                fontsize="small", ha="left", va="bottom", zorder=6,
-            )
+            scene.ax.text(*position, f" J {joint_idx}", fontsize="small", va="bottom", zorder=6,
+                          axlim_clip=True)
         for body_id, point_slice in geom.pt_slices.items():
             for point_idx, position in enumerate(geom.pts[0, point_slice]):
                 scene.ax.text(
                     *position, f" $BD_{{{point_idx}}}^{{{body_id}}}$",
-                    fontsize="small", va="bottom", zorder=6,
+                    fontsize="small", va="bottom", zorder=6, axlim_clip=True,
                 )
         for point_idx, position in enumerate(geom.ground):
-            scene.ax.text(*position, f" $GR_{point_idx}$", transform=ground_label_transform, fontsize="small", va="top", ha='center', zorder=6)
+            scene.ax.text(*position, f" GR[{point_idx}]", fontsize="small", va="bottom", zorder=6,
+                          axlim_clip=True)
     return scene.fig, scene.ax
 
 
 def animate_multibody(
     mbd, kin, *, frame_step=1, fps=20, loop=False, save_path=None,
-    ax=None, bounds=None, show_triads=False, show_springs=True,
+    axes=None, bounds=None, show_triads=False, show_springs=True,
     forces=None, show_forces=True, force_scale=0.2, triad_scale=None, view=None,
-    camera_mode="track",
 ):
-    """Animate a 3-D multibody system over the frames of *kin*.
+    """Animate a 3-D multibody system over the frames of *kin* in two views.
 
-    Shares the drawing path of :func:`plot_snapshot`; later frames only move
-    the existing artists and, in tracking mode, the viewing bounds.  The figure
-    is neither shown nor closed; keep a reference to the returned animation
-    while it is displayed.
+    Left: global view with fixed limits covering the whole trajectory.  Right:
+    tracked view, a fixed-size cube following the moving system (see
+    :func:`plot_snapshot`).  Later frames only move the existing artists.  The
+    figure is neither shown nor closed; keep a reference to the returned
+    animation while it is displayed.
 
     Parameters
     ----------
-    mbd, kin, ax, show_triads, show_springs, forces, show_forces,
-    force_scale, triad_scale, view
-        As in :func:`plot_snapshot`.
-    camera_mode : {"track", "global"}, optional
-        Default "track": centre a constant-size cube on the current CGs, joints
-        and body points, excluding fixed ground points and travel between
-        frames.  Force arrows are included in its size.  Symbol sizes use the
-        moving-system extent, and camera orientation stays unchanged.
-        Ground points and ground-connected elements may leave the view.
-        Use "global" for the fixed whole-trajectory view of :func:`plot_snapshot`.
+    mbd, kin, show_triads, show_springs, forces, show_forces, force_scale,
+    triad_scale, view
+        As in :func:`plot_snapshot`; *view* applies to both views.
+    axes : pair of Axes3D, optional
+        ``(global_ax, tracked_ax)`` to draw on; a new 1 x 2 figure if omitted.
     bounds : tuple of 6 floats, optional
-        Explicit fixed limits, overriding camera tracking.
+        Limits of the global view; default a cube spanning every frame of
+        *kin* (and the arrow tips).
     frame_step : int, optional
         Draw every ``frame_step``-th frame of *kin*.
     fps : float, optional
@@ -493,17 +479,30 @@ def animate_multibody(
     suffix = None if save_path is None else Path(save_path).suffix.lower()
     if suffix not in (None, ".gif", ".mp4"):
         raise ValueError(f"save_path must end in .gif or .mp4, got {suffix!r}.")
+    if axes is not None and len(axes) != 2:
+        raise ValueError("axes must be a pair (global_ax, tracked_ax) of 3-D axes.")
 
     frames = np.arange(0, kin.r_cg.shape[0], frame_step)
     geom   = _scene_geometry(
         mbd, kin, frames, triad_scale=triad_scale, bounds=bounds,
         show_triads=show_triads, show_springs=show_springs,
         forces=forces, show_forces=show_forces, force_scale=force_scale,
-        camera_mode=camera_mode,
     )
-    scene  = _render(geom, 0, ax=ax, view=view)
+    if axes is None:
+        fig  = plt.figure(figsize=(14, 6))
+        axes = [fig.add_subplot(1, 2, i, projection="3d") for i in (1, 2)]
+    scenes = [
+        _render(geom, 0, ax=axes[0], view=view, title="Global view\n"),
+        _render(geom, 0, ax=axes[1], view=view, track=True, title="Tracked view\n"),
+    ]
+    scenes[1].ax.get_legend().remove()                                # one legend for both views
+
+    def update(k):
+        for scene in scenes:
+            _render(geom, k, scene=scene)
+
     anim   = FuncAnimation(
-        scene.fig, lambda k: _render(geom, k, scene=scene),
+        scenes[0].fig, update,
         frames=len(frames), interval=1000.0 / fps, blit=False, repeat=loop,
     )
     if suffix is not None:

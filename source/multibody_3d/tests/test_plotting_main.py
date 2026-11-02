@@ -11,7 +11,6 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import sympy as sym  # noqa: E402
 from matplotlib.animation import FuncAnimation  # noqa: E402
-from mpl_toolkits.mplot3d import proj3d  # noqa: E402
 
 from multibody_3d import (  # noqa: E402
     MbdSystem3D, compute_forces_states, compute_kinematics_states, plotting,
@@ -189,8 +188,34 @@ def test_default_bounds_are_a_cube_enclosing_every_frame():
 def test_bounds_ignore_non_finite_states():
     mbd, kin = _chain()
     kin.r_cg[-1] = np.inf   # e.g. an unsaved solver step
-    g = plotting_main._scene_geometry(mbd, kin, [0])
-    assert np.all(np.isfinite(g.bounds))
+    g = _all_frames(mbd, kin)
+    assert np.all(np.isfinite(g.bounds)) and np.all(np.isfinite(g.track_bounds))
+
+
+def test_track_bounds_are_equal_cubes_following_the_moving_system():
+    mbd, kin, forces = _arrow_system()
+    travel = np.arange(N_FRAMES)[:, None, None] * np.array([100.0, -50.0, 25.0])
+    for positions in (kin.r_cg, kin.r_joint, kin.r_pts):
+        positions += travel
+    kin.r_gr += 10000.0                                   # far-away ground is not tracked
+    g = _all_frames(mbd, kin, forces=forces)
+    limits = g.track_bounds.reshape(N_FRAMES, 3, 2)
+    sizes  = np.ptp(limits, axis=-1)
+    np.testing.assert_allclose(sizes, sizes[0, 0])
+    assert sizes[0, 0] < 0.01 * np.ptp(np.reshape(g.bounds, (3, 2)), axis=1).max()
+    for k in range(N_FRAMES):
+        inside = np.concatenate([
+            kin.r_cg[k], kin.r_joint[k], kin.r_pts[k],
+            g.layers["cg_forces"].segments[k, 0], g.layers["point_forces"].segments[k, 0],
+        ])
+        assert np.all(inside >= limits[k, :, 0]) and np.all(inside <= limits[k, :, 1])
+
+
+def test_track_bounds_of_a_frame_subset_match_the_full_geometry():
+    mbd, kin, forces = _arrow_system()
+    full = _all_frames(mbd, kin, forces=forces)
+    sub  = plotting_main._scene_geometry(mbd, kin, [2], forces=forces)
+    np.testing.assert_allclose(sub.track_bounds, full.track_bounds[[2]])
 
 
 def test_geometry_rejects_kinematics_of_another_system():
@@ -403,26 +428,6 @@ def test_render_updates_artists_in_place():
 
 
 @pytest.mark.parametrize("provided_axes", [False, True])
-def test_render_keeps_legend_outside_plotting_box(provided_axes):
-    mbd, kin, forces = _arrow_system()
-    geom = _all_frames(mbd, kin, forces=forces)
-    ax = plt.figure().add_subplot(projection="3d") if provided_axes else None
-    scene = plotting_main._render(geom, 0, ax=ax)
-    for frame in (0, 3):
-        plotting_main._render(geom, frame, scene=scene)
-        scene.fig.canvas.draw()
-        renderer = scene.fig.canvas.get_renderer()
-        legend_box = scene.ax.get_legend().get_window_extent(renderer)
-        axes_box = scene.ax.get_window_extent(renderer)
-        assert legend_box.x0 > axes_box.x1
-        if not provided_axes:
-            figure_box = scene.fig.bbox
-            assert legend_box.x1 <= figure_box.x1
-            assert legend_box.y0 >= figure_box.y0
-            assert legend_box.y1 <= figure_box.y1
-
-
-@pytest.mark.parametrize("provided_axes", [False, True])
 def test_render_keeps_markers_above_lines_after_drawing_and_updating(provided_axes):
     mbd, kin, forces = _arrow_system()
     geom = _all_frames(mbd, kin, forces=forces, show_triads=True)
@@ -490,9 +495,9 @@ def test_snapshot_point_labels_are_opt_in_and_use_local_point_indices():
 
     fig, ax = plotting.plot_snapshot(mbd, kin, frame=-2, show_labels=True)
     expected = {
-        r"$J_{0}$": kin.r_joint[-2, 0], r"$J_{1}$": kin.r_joint[-2, 1],
+        "J 0": kin.r_joint[-2, 0], "J 1": kin.r_joint[-2, 1],
         r"$BD_{0}^{1}$": kin.r_pts[-2, 0], r"$BD_{0}^{2}$": kin.r_pts[-2, 1],
-        "$GR_0$": kin.r_gr[0],
+        "GR[0]": kin.r_gr[0],
     }
     assert {text.get_text().strip() for text in ax.texts} == set(expected)
     for text in ax.texts:
@@ -503,40 +508,7 @@ def test_snapshot_point_labels_are_opt_in_and_use_local_point_indices():
 def test_snapshot_point_labels_without_declared_points():
     mbd, kin = _chain(with_points=False)
     _, ax = plotting.plot_snapshot(mbd, kin, show_labels=True)
-    assert {text.get_text().strip() for text in ax.texts} == {r"$J_{0}$", r"$J_{1}$"}
-
-
-def test_snapshot_joint_labels_clear_markers_after_camera_zoom_and_dpi_changes(monkeypatch):
-    mbd, kin = _chain()
-    rendered_bounds = {}
-    original_draw = matplotlib.text.Text.draw
-
-    def record_bounds(text, renderer):
-        label = text.get_text().strip()
-        if label.startswith("$J_{"):
-            rendered_bounds[label] = text.get_window_extent(renderer)
-        return original_draw(text, renderer)
-
-    monkeypatch.setattr(matplotlib.text.Text, "draw", record_bounds)
-    fig, ax = plotting.plot_snapshot(mbd, kin, show_labels=True)
-    joints = next(line for line in ax.lines if line.get_label() == "Joints")
-    for dpi, view, limit in ((72, (30, -60), 5), (144, (-15, 120), 100)):
-        fig.set_dpi(dpi)
-        ax.view_init(*view)
-        ax.set(xlim=(-limit, limit), ylim=(-limit, limit), zlim=(-limit, limit))
-        fig.canvas.draw()
-        assert len(rendered_bounds) == kin.r_joint.shape[1]
-        marker_radius = 0.5 * joints.get_markersize() * dpi / 72.0
-        for joint_idx, position in enumerate(kin.r_joint[-1]):
-            projected = proj3d.proj_transform(*position, ax.get_proj())
-            marker = ax.transData.transform(projected[:2])
-            label_bounds = rendered_bounds[f"$J_{{{joint_idx}}}$"]
-            assert label_bounds.x0 > marker[0] + marker_radius
-            assert label_bounds.y0 > marker[1] + marker_radius
-            np.testing.assert_allclose(
-                [label_bounds.x0, label_bounds.y0] - marker, np.full(2, 8.0 * dpi / 72.0),
-                atol=1e-8,
-            )
+    assert {text.get_text().strip() for text in ax.texts} == {"J 0", "J 1"}
 
 
 def test_snapshot_frame_out_of_range_raises():
@@ -560,6 +532,25 @@ def test_snapshot_rejects_2d_axes():
         plotting.plot_snapshot(mbd, kin, ax=ax)
 
 
+def test_snapshot_legend_is_outside_the_axes_and_inside_the_figure():
+    mbd, kin = _chain()
+    fig, ax = plotting.plot_snapshot(mbd, kin)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    legend = ax.get_legend().get_window_extent(renderer)
+    assert legend.x0 >= ax.get_window_extent(renderer).x1
+    assert legend.x1 <= fig.bbox.x1
+
+
+def test_snapshot_uses_the_tracked_view_of_its_frame():
+    mbd, kin = _chain()
+    kin.r_gr += 1000.0
+    _, ax = plotting.plot_snapshot(mbd, kin, frame=1)
+    limits = np.array([ax.get_xlim(), ax.get_ylim(), ax.get_zlim()])
+    np.testing.assert_allclose(limits.ravel(), _all_frames(mbd, kin).track_bounds[1])
+    ax.figure.canvas.draw()
+
+
 def test_snapshot_honours_explicit_bounds_and_view():
     mbd, kin = _chain()
     _, ax = plotting.plot_snapshot(mbd, kin, bounds=(-1, 1, -2, 2, -3, 3), view=(15, 40))
@@ -580,104 +571,25 @@ def test_animation_is_returned_and_leaves_the_figure_open():
     assert len(plt.get_fignums()) == 1
 
 
-@pytest.mark.parametrize("camera_mode", [None, "track", "global"])
-def test_animation_camera_tracks_by_default_and_global_preserves_fixed_bounds(camera_mode):
+def test_animation_shows_global_and_tracked_views_side_by_side(tmp_path):
+    mbd, kin = _chain(n_frames=5)
+    anim = plotting.animate_multibody(mbd, kin, frame_step=2, save_path=tmp_path / "a.gif")
+    left, right = anim._fig.axes
+    g = _all_frames(mbd, kin)
+    for ax, expected, name in ((left, g.bounds, "Global"), (right, g.track_bounds[4], "Tracked")):
+        limits = np.array([ax.get_xlim(), ax.get_ylim(), ax.get_zlim()]).ravel()
+        np.testing.assert_allclose(limits, expected)
+        assert ax.get_title().startswith(name) and ax.get_title().endswith("t = 1.000 s")
+
+
+def test_animation_draws_on_given_axes_and_rejects_a_single_axes():
     mbd, kin = _chain()
-    travel = np.arange(N_FRAMES)[:, None, None] * np.array([100.0, -50.0, 25.0])
-    for positions in (kin.r_cg, kin.r_joint, kin.r_pts):
-        positions[:] = positions[[0]] + travel
-    kin.r_gr[:] = 10000.0
-    global_bounds = np.reshape(_all_frames(mbd, kin).bounds, (3, 2))
-    options = {} if camera_mode is None else {"camera_mode": camera_mode}
-    anim = plotting.animate_multibody(mbd, kin, frame_step=2, view=(15, 40), **options)
-    widths = []
-    for animation_frame, state_frame in enumerate(range(0, N_FRAMES, 2)):
-        scene = anim._func(animation_frame)
-        limits = np.array([scene.ax.get_xlim(), scene.ax.get_ylim(), scene.ax.get_zlim()])
-        widths.append(np.ptp(limits, axis=1))
-        if camera_mode == "global":
-            np.testing.assert_allclose(limits, global_bounds)
-        else:
-            moving = np.concatenate([
-                kin.r_cg[state_frame], kin.r_joint[state_frame], kin.r_pts[state_frame],
-            ])
-            np.testing.assert_allclose(limits.mean(axis=1), 0.5 * (moving.min(0) + moving.max(0)))
-            assert np.all(moving >= limits[:, 0]) and np.all(moving <= limits[:, 1])
-            assert widths[-1].max() < 2.0 * _system_size(kin)
-        assert (scene.ax.elev, scene.ax.azim) == (15, 40)
-    np.testing.assert_allclose(widths[0], widths[-1])
-
-
-@pytest.mark.parametrize("camera_mode", ["track", "global"])
-def test_animation_explicit_bounds_override_camera_tracking(camera_mode):
-    mbd, kin = _chain()
-    bounds = (-1, 1, -2, 2, -3, 3)
-    anim = plotting.animate_multibody(mbd, kin, bounds=bounds, camera_mode=camera_mode)
-    for frame in (0, N_FRAMES - 1):
-        scene = anim._func(frame)
-        limits = np.array([scene.ax.get_xlim(), scene.ax.get_ylim(), scene.ax.get_zlim()])
-        np.testing.assert_allclose(limits.ravel(), bounds)
-
-
-def test_animation_rejects_unknown_camera_mode_before_creating_a_figure():
-    mbd, kin = _chain()
-    with pytest.raises(ValueError, match="camera_mode"):
-        plotting.animate_multibody(mbd, kin, camera_mode="invalid")
-    assert not plt.get_fignums()
-
-
-def test_tracking_geometry_includes_force_arrows_and_triads_without_zoom_changes():
-    mbd, kin, forces = _arrow_system()
-    geom = _all_frames(mbd, kin, forces=forces, show_triads=True, camera_mode="track")
-    limits = np.asarray(geom.bounds).reshape(N_FRAMES, 3, 2)
-    np.testing.assert_allclose(
-        np.ptp(limits, axis=2), np.broadcast_to(np.ptp(limits[0], axis=1), (N_FRAMES, 3)),
-    )
-    for name in ("cg_forces", "point_forces", "triads"):
-        positions = geom.layers[name].segments.reshape(N_FRAMES, -1, 3)
-        assert np.all(positions >= limits[:, None, :, 0])
-        assert np.all(positions <= limits[:, None, :, 1])
-    triads = geom.layers["triads"].segments
-    np.testing.assert_allclose(
-        np.linalg.norm(triads[:, :, 1] - triads[:, :, 0], axis=-1), 0.1 * _system_size(kin),
-    )
-    subset = plotting_main._scene_geometry(
-        mbd, kin, [2], forces=forces, show_triads=True, camera_mode="track",
-    )
-    np.testing.assert_allclose(subset.bounds[0], geom.bounds[2])
-
-
-def test_tracking_symbol_sizes_ignore_translation_and_distant_ground_points():
-    mbd, kin, forces = _arrow_system()
-    mbd.forces_def.tension_springs = [_tension(2, 0, 2, 1)]
-    original = _all_frames(mbd, kin, forces=forces, show_triads=True, camera_mode="track")
-    travel = np.arange(N_FRAMES)[:, None, None] * np.array([100.0, -50.0, 25.0])
-    for positions in (kin.r_cg, kin.r_joint, kin.r_pts):
-        positions += travel
-    kin.r_gr += 10000.0
-    moved = _all_frames(mbd, kin, forces=forces, show_triads=True, camera_mode="track")
-    for name in original.layers:
-        np.testing.assert_allclose(
-            moved.layers[name].segments - travel[:, :, None], original.layers[name].segments,
-            atol=1e-12,
-        )
-    np.testing.assert_allclose(
-        np.asarray(moved.bounds).reshape(N_FRAMES, 3, 2) - travel.reshape(N_FRAMES, 3, 1),
-        np.asarray(original.bounds).reshape(N_FRAMES, 3, 2), atol=1e-12,
-    )
-
-
-def test_tracking_bounds_handle_missing_points_and_non_finite_frames():
-    mbd, kin = _chain(with_points=False)
-    kin.r_cg[-1] = np.inf
-    kin.r_joint[-1] = np.nan
-    geom = _all_frames(mbd, kin, camera_mode="track")
-    assert np.all(np.isfinite(geom.bounds))
-    np.testing.assert_allclose(geom.bounds[-1], geom.bounds[-2])
-    kin.r_cg[:] = 0.0
-    kin.r_joint[:] = 0.0
-    limits = np.asarray(_all_frames(mbd, kin, camera_mode="track").bounds).reshape(N_FRAMES, 3, 2)
-    assert np.all(np.isfinite(limits)) and np.all(np.ptp(limits, axis=2) > 0.0)
+    fig = plt.figure()
+    axes = [fig.add_subplot(1, 2, i, projection="3d") for i in (1, 2)]
+    anim = plotting.animate_multibody(mbd, kin, axes=axes)
+    assert anim._fig is fig
+    with pytest.raises(ValueError, match="axes"):
+        plotting.animate_multibody(mbd, kin, axes=axes[:1])
 
 
 def test_animation_saves_a_gif_with_the_selected_frames(tmp_path):

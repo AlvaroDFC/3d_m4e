@@ -126,7 +126,7 @@ plot.plot_body_trajectories(kin)
 from multibody_3d import compute_forces_states
 forces = compute_forces_states(mbd, sol.ts, sol.ys, mainNumVars) if mbd.forces_func is not None else None
 plot.plot_snapshot(mbd, kin, frame=0, forces=forces, show_labels=True)
-anim = plot.animate_multibody(mbd, kin, forces=forces, frame_step=2, fps=20, camera_mode='track')   # save_path="anim.gif" writes a file
+anim = plot.animate_multibody(mbd, kin, forces=forces, frame_step=2, fps=20)   # save_path="anim.gif" writes a file
 
 plt.show()
 
