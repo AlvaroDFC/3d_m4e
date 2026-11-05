@@ -41,11 +41,6 @@ print(f"JAX JIT:      {(time()-t0)/n*1e6:.2f} µs/call")
 
 np.set_printoptions(precision=4, suppress=True)
 
-print("\nB (JAX):")
-print(B_jax)
-
-print("\nBdot (JAX):")
-print(Bdot_jax)
 
 
 ####### Symbolic B blocks (for inspection, not timed) #####################################
@@ -106,27 +101,39 @@ print(f"Output shape (time x state): {sol.ys.shape}")
 n_qi = mbd.total_cfg_dof
 print(f"Final q_int: {np.array(sol.ys[-1, :n_qi]).round(4)}")
 print(f"Final qd:    {np.array(sol.ys[-1, n_qi:]).round(4)}")
-
+print("=" * 70)
+print(
+    "A detailed Documentation is available at documentation/source/\n"
+    "To build from the repository root (after installing .[docs]):\n"
+    "python -m sphinx -n -W --keep-going "
+    "documentation/source documentation/build/html\n"
+    "To open, check ->: documentation/build/html/index.html"
+)
+print("=" * 70)
 ## Plots and energy summary
 from multibody_3d import plotting as plot
 
-plot.plot_coordinates(sol, n_qi, mbd.coords.names_int, mbd.coords.names_d)
-
 energy = mbd.compute_energy(sol, mainNumVars)
-plot.print_system_energy(energy)
-print(f"Internal steps used  : {int(sol.stats['num_steps'])}")
-plot.plot_system_energy(energy)
-plot.plot_body_energy(energy)
-
+# plot.print_system_energy(energy)
+# print(f"Internal steps used  : {int(sol.stats['num_steps'])}")
 kin = mbd.compute_kinematics(sol, mainNumVars)
-plot.plot_body_velocities(kin)
-plot.plot_body_trajectories(kin)
 
-# 3-D snapshot and animation; keep `anim` referenced while the window is open
+# Show the initial configuration first. Closing this window continues to the animation.
 from multibody_3d import compute_forces_states
 forces = compute_forces_states(mbd, sol.ts, sol.ys, mainNumVars) if mbd.forces_func is not None else None
 plot.plot_snapshot(mbd, kin, frame=0, forces=forces, show_labels=True)
-anim = plot.animate_multibody(mbd, kin, forces=forces, frame_step=2, fps=20)   # save_path="anim.gif" writes a file
+plt.show(block=True)
 
+# Keep `anim` referenced while its window is open.
+anim = plot.animate_multibody(mbd, kin, forces=forces, frame_step=2, fps=20)   # save_path="anim.gif" writes a file
+plt.show(block=True)
+
+# Show the time-history plots after closing the animation.
+plot.plot_coordinates(sol, n_qi, mbd.coords.names_int, mbd.coords.names_d)
+plot.plot_system_energy(energy)
+plot.plot_body_energy(energy)
+plot.plot_body_velocities(kin)
+plot.plot_body_trajectories(kin)
 plt.show()
+
 
