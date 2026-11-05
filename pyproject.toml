@@ -16,6 +16,13 @@ dependencies = [
     "networkx"
 ]
 
+[project.optional-dependencies]
+docs = [
+    "sphinx>=7",
+    "myst-parser",
+    "furo",
+]
+
 [tool.setuptools]
 package-dir = {"" = "source"}
 
