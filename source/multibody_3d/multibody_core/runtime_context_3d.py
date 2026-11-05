@@ -11,8 +11,8 @@ extract the constant parameter blocks, freeze ``eom_func`` / ``forces_func``,
 and rebuild the ``build_cache_jax`` / ``build_rate_cache_jax`` keyword
 dictionaries, this module builds that frozen context once per
 integrate/postprocess cycle and hands it to consumers such as
-``compute_energy_3d`` (mass_runtime_3d.py) and ``compute_kinematics_3d``
-(kinematics_runtime_3d.py).
+``compute_energy_3d`` (mass_runtime_3d.py), ``compute_kinematics_3d``
+(kinematics_runtime_3d.py) and ``compute_forces_states`` (forces_runtime_3d.py).
 
 Not part of the ODE right-hand side; see ``integrator_3d.py`` for that.
 """
@@ -84,9 +84,6 @@ class RuntimeContext:
         :func:`velocity_transformation_3d.build_rate_cache_jax`
         (``A_abs``/``r_abs``/``rJ``/``U`` are supplied per-call from the
         position cache, not stored here).
-    is_time_dependent : bool
-        Whether the declared forces reference the reserved time symbol.
-        Always *False* until time-dependent forces are implemented.
     """
     n_qi: int
     NB:   int
@@ -100,7 +97,6 @@ class RuntimeContext:
     forces_e: Optional[Any]
     pos_cache_kwargs: Dict[str, Any]
     rate_topo_kwargs: Dict[str, Any]
-    is_time_dependent: bool = False
 
     def build_mainint(self, y: "jnp.ndarray") -> "jnp.ndarray":
         """Concatenate a diffrax state ``y = [q_int, qd]`` with the frozen
@@ -179,11 +175,6 @@ def build_runtime_context(mbd: "MbdSystem3D", mainNumVars) -> RuntimeContext:
         pos_cache_kwargs = {k: v for k, v in geom.items() if k in _POS_CACHE_KEYS}
         rate_topo_kwargs = {k: v for k, v in geom.items() if k in _RATE_TOPO_KEYS}
 
-    is_time_dependent = bool(
-        mbd.forces_def is not None
-        and getattr(mbd.forces_def, "is_time_dependent", False)
-    )
-
     return RuntimeContext(
         n_qi=mbd.total_cfg_dof,
         NB=mbd.NBodies,
@@ -195,5 +186,33 @@ def build_runtime_context(mbd: "MbdSystem3D", mainNumVars) -> RuntimeContext:
         forces_e=forces_e,
         pos_cache_kwargs=pos_cache_kwargs,
         rate_topo_kwargs=rate_topo_kwargs,
-        is_time_dependent=is_time_dependent,
     )
+
+
+def as_internal_states(mbd: "MbdSystem3D", ys, need_qd: bool) -> np.ndarray:
+    """Return state rows in the internal layout, mapping from the user layout if needed.
+
+    Rows are ``[q_int, qd]`` (e.g. ``sol.ys``) or ``[q_user, qd]``; the layout is
+    told apart by the row width.  The ``qd`` columns may only be omitted when
+    *need_qd* is False.
+    """
+    ys = np.atleast_2d(np.asarray(ys, dtype=float))
+    n_qi, n_qu, n_qd = mbd.total_cfg_dof, mbd.total_user_dof, mbd.total_dof
+    width = ys.shape[1]
+
+    if width in (n_qi, n_qi + n_qd):
+        out = ys   # also the user layout when no Euler S/F joint is present
+    elif width in (n_qu, n_qu + n_qd):
+        q_int = np.stack([mbd.map_q_user_to_q_int(row[:n_qu]) for row in ys])
+        out   = np.hstack([q_int, ys[:, n_qu:]])
+    else:
+        raise ValueError(
+            f"State width {width} not recognised: expected [q_int, qd] ({n_qi + n_qd}) "
+            f"or [q_user, qd] ({n_qu + n_qd}); without velocities also q_int ({n_qi}) "
+            f"or q_user ({n_qu})."
+        )
+    if need_qd and out.shape[1] != n_qi + n_qd:
+        raise ValueError(
+            f"State rows need the qd columns (width {n_qi + n_qd} or {n_qu + n_qd}); got {width}."
+        )
+    return out

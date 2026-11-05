@@ -223,13 +223,11 @@ class TestTimeDependentEvaluation:
             expected = amplitude * np.sin(tt)
             assert float(result.cg[0, 0]) == pytest.approx(expected, abs=1e-6)
 
-    def test_default_t_is_zero(self, mbd_time_cg):
-        """Omitting t defaults to 0.0 (for standalone/inspection calls)."""
+    def test_omitting_t_raises(self, mbd_time_cg):
+        """A time-dependent system must not silently fall back to t=0."""
         mbd, _ = mbd_time_cg
-        mnv = _mnv_1body(param=5.0)
-        result_default = mbd.evaluate_forces(mnv)
-        result_t0 = mbd.evaluate_forces(mnv, t=0.0)
-        assert float(result_default.cg[0, 0]) == pytest.approx(float(result_t0.cg[0, 0]))
+        with pytest.raises(ValueError, match="depend on time"):
+            mbd.evaluate_forces(_mnv_1body(param=5.0))
 
     def test_no_moment_induced(self, mbd_time_cg):
         mbd, _ = mbd_time_cg

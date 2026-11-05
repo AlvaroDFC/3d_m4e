@@ -58,7 +58,7 @@ Gravity
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import sympy as sym
@@ -70,14 +70,9 @@ if TYPE_CHECKING:
     from .force_definition_3d import ForcesDefinition3D
 
 try:
-    from ._velocity_transformation_helper import skew
+    from .points_3d import _get_point_record, sym_force_reduction_at_point
 except Exception:  # pragma: no cover
-    from _velocity_transformation_helper import skew
-
-try:
-    from .points_3d import sym_force_reduction_at_point
-except Exception:  # pragma: no cover
-    from points_3d import sym_force_reduction_at_point
+    from points_3d import _get_point_record, sym_force_reduction_at_point
 
 
 # ---------------------------------------------------------------------------
@@ -131,36 +126,6 @@ def _wrench6(f: sym.Matrix, m: sym.Matrix) -> sym.Matrix:
     f3 = sym.Matrix(f).reshape(3, 1)
     m3 = sym.Matrix(m).reshape(3, 1)
     return f3.col_join(m3)
-
-
-def _get_point_rec(
-    body_id: int,
-    pt_idx:  int,
-    sym_points: "SymbolicPointsCache3D",
-    label:   str,
-) -> "PointRecord3D":
-    """Look up a :class:`PointRecord3D` by body id and point index."""
-    if body_id == 0:
-        pts = sym_points.ground_points
-        if pt_idx >= len(pts):
-            raise ValueError(
-                f"{label}: ground point index {pt_idx} is out of range "
-                f"(only {len(pts)} ground point(s) declared)."
-            )
-        return pts[pt_idx]
-    else:
-        if body_id not in sym_points.body_points:
-            raise ValueError(
-                f"{label}: body {body_id} has no declared points "
-                "in Initial_Points[\"BD\"]."
-            )
-        pts = sym_points.body_points[body_id]
-        if pt_idx >= len(pts):
-            raise ValueError(
-                f"{label}: body {body_id} has only {len(pts)} point(s); "
-                f"pt_idx={pt_idx} is out of range."
-            )
-        return pts[pt_idx]
 
 
 def _r_abs_mat(rec: "PointRecord3D") -> sym.Matrix:
@@ -224,7 +189,7 @@ def _build_point_force_wrenches(
     wrenches = _zeros_wrenches(NBodies)
     for i, d in enumerate(forces_def.point_forces):
         label = f"PointsBD[{i}]"
-        rec = _get_point_rec(d.body_id, d.point_idx, sym_points, label)
+        rec = _get_point_record(d.body_id, d.point_idx, sym_points, label)
         f_vec = sym.Matrix(list(d.force_vec)).reshape(3, 1)
         m_free = sym.Matrix(list(d.moment_vec)).reshape(3, 1)
         # Force reduction: f_eq = f_vec, m_from_r = rho × f
@@ -251,8 +216,8 @@ def _build_tension_spring_wrenches(
 
     for i, d in enumerate(forces_def.tension_springs):
         label = f"TensionSpring[{i}]"
-        rec_a = _get_point_rec(d.body_id_a, d.pt_idx_a, sym_points, label + " A")
-        rec_b = _get_point_rec(d.body_id_b, d.pt_idx_b, sym_points, label + " B")
+        rec_a = _get_point_record(d.body_id_a, d.pt_idx_a, sym_points, label + " A")
+        rec_b = _get_point_record(d.body_id_b, d.pt_idx_b, sym_points, label + " B")
 
         r_a = _r_abs_mat(rec_a)
         r_b = _r_abs_mat(rec_b)
@@ -312,8 +277,8 @@ def _build_tension_damper_wrenches(
 
     for i, d in enumerate(forces_def.tension_dampers):
         label = f"TensionDamper[{i}]"
-        rec_a = _get_point_rec(d.body_id_a, d.pt_idx_a, sym_points, label + " A")
-        rec_b = _get_point_rec(d.body_id_b, d.pt_idx_b, sym_points, label + " B")
+        rec_a = _get_point_record(d.body_id_a, d.pt_idx_a, sym_points, label + " A")
+        rec_b = _get_point_record(d.body_id_b, d.pt_idx_b, sym_points, label + " B")
 
         r_a = _r_abs_mat(rec_a)
         r_b = _r_abs_mat(rec_b)
@@ -444,7 +409,6 @@ def _build_torsion_damper_wrenches(
 
 def _build_gravity_wrenches(
     forces_def: "ForcesDefinition3D",
-    pos_cache: "KinematicsCache3D",
     NBodies: int,
     body_inertia: dict = {},
 ) -> List[sym.Matrix]:
@@ -587,7 +551,7 @@ def build_forces_symbolic(
     # Gravity
     if forces_def.gravity is not None:
         wrench_by_category["Gravity"] = _build_gravity_wrenches(
-            forces_def, pos_cache, NBodies, body_inertia=body_inertia
+            forces_def, NBodies, body_inertia=body_inertia
         )
 
     # --- Total wrench (sum across categories) ----------------------------

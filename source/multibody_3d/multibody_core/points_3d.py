@@ -1,6 +1,6 @@
 """points_3d.py
 
-Symbolic 3-D points layer and JAX runtime point evaluators.
+Symbolic 3-D points layer.
 
 Parses ``Initial_Points`` and builds opaque symbolic position expressions for
 every declared point, using a pre-built ``KinematicsCache3D`` as the sole
@@ -41,19 +41,11 @@ Indexing
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
 import sympy as sym
 from sympy import MatMul
-
-try:
-    import jax
-    import jax.numpy as jnp
-    jax.config.update("jax_enable_x64", True)
-    _JAX_AVAILABLE = True
-except ImportError:
-    _JAX_AVAILABLE = False
 
 if TYPE_CHECKING:  # avoids a runtime import cycle
     from .velocity_transformation_3d import KinematicsCache3D
@@ -311,139 +303,31 @@ def sym_force_reduction_at_point(
     return f_col, m_eq
 
 
-# ---------------------------------------------------------------------------
-# Numeric (JAX) force-reduction helper
-# ---------------------------------------------------------------------------
+def _get_point_record(
+    body_id: int, pt_idx: int, sym_points: SymbolicPointsCache3D, label: str,
+) -> PointRecord3D:
+    """Look up a declared point by body id (0 = ground) and 0-based index."""
+    if body_id == 0:
+        pts = sym_points.ground_points
+        if pt_idx >= len(pts):
+            raise ValueError(
+                f"{label}: ground point index {pt_idx} is out of range "
+                f"(only {len(pts)} ground point(s) declared)."
+            )
+        return pts[pt_idx]
+    if body_id not in sym_points.body_points:
+        raise ValueError(
+            f"{label}: body {body_id} has no declared points "
+            "in Initial_Points[\"BD\"]."
+        )
+    pts = sym_points.body_points[body_id]
+    if pt_idx >= len(pts):
+        raise ValueError(
+            f"{label}: body {body_id} has only {len(pts)} point(s); "
+            f"pt_idx={pt_idx} is out of range."
+        )
+    return pts[pt_idx]
 
-def force_reduction_at_point(
-    rho_abs: "jnp.ndarray",
-    force_vec: "jnp.ndarray",
-) -> "tuple[jnp.ndarray, jnp.ndarray]":
-    """Reduce a force applied at a body point to force + moment about the CG.
-
-    Pure-JAX implementation suitable for use inside or outside JIT-compiled
-    functions.  Operates on a single point's data.
-
-    Parameters
-    ----------
-    rho_abs : array_like, shape ``(3,)``
-        CG-relative moment arm in the world frame
-        (a row from :attr:`PointsEvalResult.rho_abs_body`).
-    force_vec : array_like, shape ``(3,)``
-        Applied force vector in the world frame.
-
-    Returns
-    -------
-    f_eq : jnp.ndarray, shape ``(3,)``
-        Equivalent body force (same as *force_vec*).
-    m_eq : jnp.ndarray, shape ``(3,)``
-        Equivalent moment about the body CG:  ``rho_abs × force_vec``.
-
-    Example
-    -------
-    >>> import jax.numpy as jnp
-    >>> rho = jnp.array([1.5, 0., 0.])   # from PointsEvalResult.rho_abs_body[i]
-    >>> f   = jnp.array([0., 0., -9.81]) # gravity-like force
-    >>> f_eq, m_eq = force_reduction_at_point(rho, f)
-    >>> m_eq  # ≈ [0, 1.5*9.81, 0] = [0, 14.715, 0]
-    """
-    rho = jnp.asarray(rho_abs,  dtype=jnp.float64).ravel()
-    f   = jnp.asarray(force_vec, dtype=jnp.float64).ravel()
-    return f, jnp.cross(rho, f)
-
-
-# ===========================================================================
-# JAX runtime layer
-# ===========================================================================
-
-# --- keys consumed by build_cache_jax (subset of _convert_topology/geometry_to_jax) ---
-_CACHE_BUILD_KEYS = frozenset({
-    "n_bodies", "n_joints", "parent", "child", "codes", "cfg_slices",
-    "p2j", "j2c", "u", "u1", "u2",
-})
-
-
-class PointsEvalResult(NamedTuple):
-    """Return type of the compiled points callable.
-
-    All fields are JAX arrays so the result is a valid JAX pytree.
-
-    Attributes
-    ----------
-    r_abs_body : jnp.ndarray, shape ``(n_body_pts, 3)``
-        Absolute world-frame positions of every user-declared body-attached
-        point, stacked in ``(body_id ASC, point_idx ASC)`` order.
-    rho_abs_body : jnp.ndarray, shape ``(n_body_pts, 3)``
-        CG-relative moment arms in the world frame:
-        ``rho = A_abs_body @ r_local``.
-    r_abs_cg : jnp.ndarray, shape ``(NBodies, 3)``
-        Absolute world-frame CG positions, one row per body (1-indexed).
-    r_abs_gr : jnp.ndarray, shape ``(n_gr, 3)``
-        World-frame positions of ground-frame reference points (constant or
-        dependent on ``points_sym`` values).
-    """
-    r_abs_body:  "jnp.ndarray"
-    rho_abs_body: "jnp.ndarray"
-    r_abs_cg:    "jnp.ndarray"
-    r_abs_gr:    "jnp.ndarray"
-
-    def reduce_force_at(
-        self,
-        point_row: int,
-        force_vec: "jnp.ndarray",
-    ) -> "tuple[jnp.ndarray, jnp.ndarray]":
-        """Reduce a force at a body point to force + moment about the CG.
-
-        Convenience wrapper around :func:`force_reduction_at_point` that
-        reads ``rho_abs_body[point_row]`` from this result object.
-
-        Parameters
-        ----------
-        point_row : int
-            Row index into :attr:`rho_abs_body` (and :attr:`r_abs_body`).
-            Use ``PointsRuntimeSpec.pt_body_slices[body_id]`` to map a
-            body-id / point-index pair to a row number.
-        force_vec : array_like, shape ``(3,)``
-            Applied force in the world frame.
-
-        Returns
-        -------
-        f_eq : jnp.ndarray, shape ``(3,)``
-            Equivalent body force (= *force_vec*).
-        m_eq : jnp.ndarray, shape ``(3,)``
-            Equivalent moment about the body CG: ``rho_abs × force_vec``.
-
-        Example
-        -------
-        >>> result = mbd.evaluate_points(mainNumVars)
-        >>> row = mbd._points_spec.pt_body_slices[4].start  # first pt of body 4
-        >>> f_eq, m_eq = result.reduce_force_at(row, jnp.array([0., 0., -9.81]))
-        """
-        return force_reduction_at_point(self.rho_abs_body[point_row], force_vec)
-
-
-@dataclass(frozen=True, slots=True)
-class PointsRuntimeSpec:
-    """Static metadata describing the layout of the :class:`PointsEvalResult`.
-
-    Use ``pt_body_slices[body_id]`` to extract the rows of
-    ``r_abs_body`` / ``rho_abs_body`` belonging to a particular body.
-
-    Attributes
-    ----------
-    n_gr : int
-        Number of declared ground-frame points.
-    n_body_pts : int
-        Total number of user-declared body-attached points across all bodies.
-    body_ids : tuple[int, ...]
-        Body id for the *i*-th row of ``r_abs_body`` / ``rho_abs_body``.
-    pt_body_slices : dict[int, slice]
-        Slice into the flat ``(n_body_pts, 3)`` arrays for each body id.
-    """
-    n_gr:           int
-    n_body_pts:     int
-    body_ids:       tuple   # tuple[int, ...]
-    pt_body_slices: dict    # dict[int, slice]
 
 # does this make sense from the AD stand point? --> To separate sympy scope from JAX scope it does
 def _make_r_local_fn(r_local_sym: "sym.Matrix", body_sym_list: list, points_sym_list: list):
@@ -473,8 +357,8 @@ def _flatten_body_points(
 
     Order: ``body_id`` ASC, then ``point_idx`` ASC within each body — the
     canonical ordering shared by every consumer of
-    ``SymbolicPointsCache3D.body_points`` (points runtime evaluator,
-    kinematics postprocessing, ...).
+    ``SymbolicPointsCache3D.body_points`` (kinematics postprocessing, force
+    evaluators, ...).
 
     Parameters
     ----------
@@ -509,182 +393,3 @@ def _flatten_body_points(
         cursor += len(recs)
 
     return body_ids_flat, r_local_fns, pt_body_slices
-
-
-def make_points_evaluator_mainint(
-    sym_points: SymbolicPointsCache3D,
-    points_sym_list: list,
-    params,          # NumericModelParams
-    slc_q_int: slice,
-    extractor,       # GeometryExtractor — for body_data_sym parameterized geometry
-    slc_body_int: slice,
-    slc_points_int: slice,
-    body_sym_list: list = (),
-) -> "tuple[callable, PointsRuntimeSpec]":
-    """Build a persistent JAX points evaluator that accepts ``mainNumVars_int``.
-
-    The returned callable has signature::
-
-        points_func(mainNumVars_int: array_like) -> PointsEvalResult
-
-    It reuses the VT JAX body-kinematics backend (:func:`build_cache_jax`)
-    as the sole kinematic source, applying the same constant-vs.-dynamic
-    geometry branching used by :func:`make_B_evaluator_mainint`.
-
-    Parameters
-    ----------
-    sym_points : SymbolicPointsCache3D
-        Symbolic points cache built by :func:`build_points_symbolic`.
-    points_sym_list : list[sym.Symbol]
-        Ordered list of point-parameter symbols (from ``points_sym.values()``).
-    params : NumericModelParams
-        Static runtime spec from ``VelocityTransformation3D.build_numeric_params()``.
-    slc_q_int : slice
-        Slice of ``q_int`` in ``mainNumVars_int``.
-    extractor : GeometryExtractor
-        Body-geometry extractor for parameterized joint geometry.
-    slc_body_int : slice
-        Slice of body-data parameters in ``mainNumVars_int``.
-    slc_points_int : slice
-        Slice of point-symbol values in ``mainNumVars_int``.
-
-    Returns
-    -------
-    callable, PointsRuntimeSpec
-    """
-    # ── Deferred JAX/VT imports (avoids circular imports at module load) ──
-    from .velocity_transformation_3d import (   # noqa: PLC0415
-        build_cache_jax,
-        _convert_geometry_to_jax,
-        _convert_topology_to_jax,
-        _np_geom_to_jax,
-    )
-
-    NB = params.n_bodies
-
-    # ── Build lambdified r_local fns for every body-attached point ────────
-    # Flat order: body_id ASC, then point_idx ASC within each body.
-    _body_sym_list = list(body_sym_list)
-    body_ids_flat, r_local_fns_flat, pt_body_slices = _flatten_body_points(
-        sym_points, _body_sym_list, points_sym_list,
-    )
-    body_0idx_flat = [b - 1 for b in body_ids_flat]  # 0-indexed (body_id - 1)
-    n_body_pts = len(body_ids_flat)
-
-    # ── Build lambdified r_local fns for ground points ────────────────────
-    gr_r_local_fns: list = [
-        _make_r_local_fn(rec.r_local, _body_sym_list, points_sym_list)
-        for rec in sym_points.ground_points
-    ]
-    n_gr = len(gr_r_local_fns)
-
-    # ── Metadata ─────────────────────────────────────────────────────────
-    spec = PointsRuntimeSpec(
-        n_gr=n_gr,
-        n_body_pts=n_body_pts,
-        body_ids=tuple(body_ids_flat),
-        pt_body_slices=pt_body_slices,
-    )
-
-    # ── Static slice offsets ─────────────────────────────────────────────
-    qi_start = slc_q_int.start
-    n_qi     = slc_q_int.stop - slc_q_int.start
-    bp_start = slc_body_int.start
-    n_bp     = slc_body_int.stop - slc_body_int.start
-    pp_start = slc_points_int.start
-    n_pp     = slc_points_int.stop - slc_points_int.start
-
-    # Capture as tuples — static at trace time
-    _body_0idx = tuple(body_0idx_flat)
-
-    # ── Topology-only kwargs for build_cache_jax ─────────────────────────
-    _full_topo = _convert_topology_to_jax(params)
-    topo_kw    = {k: v for k, v in _full_topo.items() if k in _CACHE_BUILD_KEYS}
-
-    # ── Helper: assemble points from A_abs / r_abs lists (traceable) ─────
-    def _assemble(A_abs, r_abs, r_locals_jax):
-        """Pure JAX computation — called inside a JIT boundary."""
-        r_pts  = []
-        rho_pts = []
-        for i, bi in enumerate(_body_0idx):      # Python loop, unrolled at trace
-            A_b   = A_abs[bi + 1]                # (3, 3)
-            r_b   = r_abs[bi + 1].ravel()        # (3,)
-            r_loc = r_locals_jax[i]              # (3,)
-            rho   = A_b @ r_loc                  # (3,)
-            r_pts.append(r_b + rho)
-            rho_pts.append(rho)
-        if r_pts:
-            r_abs_body_out  = jnp.stack(r_pts)
-            rho_abs_body_out = jnp.stack(rho_pts)
-        else:
-            r_abs_body_out  = jnp.zeros((0, 3), dtype=jnp.float64)
-            rho_abs_body_out = jnp.zeros((0, 3), dtype=jnp.float64)
-        r_abs_cg = jnp.stack([r_abs[b + 1].ravel() for b in range(NB)])  # (NB, 3)
-        return r_abs_body_out, rho_abs_body_out, r_abs_cg
-
-    # ── Helper: evaluate r_local fns + ground fns from numpy params ─────
-    def _eval_r_locals(bp, pt_params):
-        if r_local_fns_flat:
-            return np.stack([fn(*bp, *pt_params) for fn in r_local_fns_flat])  # (N, 3)
-        return np.zeros((0, 3), dtype=float)
-
-    def _eval_gr(bp, pt_params):
-        if gr_r_local_fns:
-            return jnp.asarray(
-                np.stack([fn(*bp, *pt_params) for fn in gr_r_local_fns]), dtype=jnp.float64
-            )
-        return jnp.zeros((0, 3), dtype=jnp.float64)
-
-    # ── Build the outer callable (two branches: constant vs. dynamic geom) ─
-    if not extractor.has_dynamic:
-        # Geometry is fully constant — bake into the JIT closure.
-        full_kw    = _convert_geometry_to_jax(params)
-        cache_kw   = {k: full_kw[k] for k in _CACHE_BUILD_KEYS}
-
-        @jax.jit
-        def _jit_pts(q_int, r_locals_jax):
-            A_abs, r_abs, _, _, _ = build_cache_jax(q_int, **cache_kw)
-            return _assemble(A_abs, r_abs, r_locals_jax)
-
-        def _evaluate(mainNumVars_int):
-            v         = np.asarray(mainNumVars_int, dtype=float)
-            q_int     = jnp.asarray(v[qi_start: qi_start + n_qi], dtype=jnp.float64)
-            bp        = v[bp_start: bp_start + n_bp]
-            pt_params = v[pp_start: pp_start + n_pp]
-            r_locals  = jnp.asarray(_eval_r_locals(bp, pt_params), dtype=jnp.float64)
-            r_body, rho_body, r_cg = _jit_pts(q_int, r_locals)
-            return PointsEvalResult(
-                r_abs_body=r_body,
-                rho_abs_body=rho_body,
-                r_abs_cg=r_cg,
-                r_abs_gr=_eval_gr(bp, pt_params),
-            )
-
-    else:
-        # Parameterized joint geometry — extract body params at runtime.
-        @jax.jit
-        def _jit_pts(q_int, r_locals_jax, p2j, j2c, u, u1, u2):
-            A_abs, r_abs, _, _, _ = build_cache_jax(
-                q_int, p2j=p2j, j2c=j2c, u=u, u1=u1, u2=u2, **topo_kw,
-            )
-            return _assemble(A_abs, r_abs, r_locals_jax)
-
-        def _evaluate(mainNumVars_int):
-            v         = np.asarray(mainNumVars_int, dtype=float)
-            q_int     = jnp.asarray(v[qi_start: qi_start + n_qi], dtype=jnp.float64)
-            bp        = v[bp_start: bp_start + n_bp]
-            pt_params = v[pp_start: pp_start + n_pp]
-            geom      = extractor.evaluate(bp)
-            p2j_j, j2c_j, u_j, u1_j, u2_j = _np_geom_to_jax(*geom)
-            r_locals  = jnp.asarray(_eval_r_locals(bp, pt_params), dtype=jnp.float64)
-            r_body, rho_body, r_cg = _jit_pts(
-                q_int, r_locals, p2j_j, j2c_j, u_j, u1_j, u2_j,
-            )
-            return PointsEvalResult(
-                r_abs_body=r_body,
-                rho_abs_body=rho_body,
-                r_abs_cg=r_cg,
-                r_abs_gr=_eval_gr(bp, pt_params),
-            )
-
-    return _evaluate, spec

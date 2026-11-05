@@ -1,4 +1,4 @@
-"""Smoke tests for multibody_3d.plotting (non-interactive backend, synthetic data)."""
+"""Smoke tests for the results plots in multibody_3d.plotting (non-interactive backend, synthetic data)."""
 import matplotlib
 
 matplotlib.use("Agg")
